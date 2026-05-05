@@ -55,7 +55,7 @@ $(BUILD)/myos.img: $(BUILD)/boot.bin $(BUILD)/minegrub.bin $(BUILD)/kernel.bin
 	dd if=/dev/zero           bs=512 count=2880 of=$@            2>/dev/null
 	dd if=$(BUILD)/boot.bin   bs=512 count=1    of=$@ seek=0  conv=notrunc 2>/dev/null
 	dd if=$(BUILD)/minegrub.bin bs=512 count=16 of=$@ seek=1  conv=notrunc 2>/dev/null
-	dd if=$(BUILD)/kernel.bin bs=512 count=80   of=$@ seek=17 conv=notrunc 2>/dev/null
+	dd if=$(BUILD)/kernel.bin bs=512 count=120  of=$@ seek=17 conv=notrunc 2>/dev/null
 	@echo "[IMG] $(BUILD)/myos.img pret"
 	@ls -lh $(BUILD)/
 

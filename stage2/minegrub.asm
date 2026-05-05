@@ -7,7 +7,7 @@
 [ORG 0x8000]
 
 KERNEL_SEG   equ 0x1000       ; adresse lineaire 0x10000
-KERNEL_SECTS equ 80
+KERNEL_SECTS equ 120          ; 120*512=61KB < 64KB => pas de frontiere DMA
 KERNEL_CHS_S equ 18           ; CHS sector = LBA 17 + 1 = 18
 VGA          equ 0xB800
 TIMEOUT      equ 5
@@ -454,7 +454,8 @@ show_loading:
     ret
 
 ; =============================================================
-; load_kernel: charge le kernel de KERNEL_CHS_S, 60 secteurs
+; load_kernel: charge KERNEL_SECTS secteurs en CHS (AH=02h)
+; 96 secteurs * 512 = 49KB depuis 0x10000 => reste sous 0x20000 (pas de DMA overflow)
 ; =============================================================
 load_kernel:
     mov ax, KERNEL_SEG
@@ -470,11 +471,10 @@ load_kernel:
     int 0x13
     jnc .ok
 
-    ; Erreur disque
     mov bh, 23
     mov bl, 20
     mov si, str_diskerr
-    mov ah, 0x0C       ; rouge
+    mov ah, 0x0C
     call vga_str
     mov ah, 0x00
     int 0x16
