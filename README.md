@@ -113,13 +113,4 @@ str_macommande db 'macommande', 0
 mon_message    db 'Hello!', 0x0A, 0
 ```
 
-## Ce qu'il n'y a PAS
-
-- Pas de C
-- Pas de gcc
-- Pas de linker
-- Pas de libc
-- Pas de stdlib
-- Pas de runtime
-
 Juste `nasm` qui traduit de l'assembleur en opcodes x86 bruts.

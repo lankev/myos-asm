@@ -22,17 +22,27 @@ typedef struct{uint8_t h,m,s,day,mon;uint16_t year;}RTC;
 static RTC _rtc;
 
 static void rtc_read(void){
-    /* Attendre la fin de la mise a jour RTC */
-    while(cmos_read(0x0A)&0x80);
+    while(cmos_read(0x0A)&0x80); /* attendre fin de mise a jour */
     uint8_t stb=cmos_read(0x0B);
     uint8_t s=cmos_read(0x00),m=cmos_read(0x02),h=cmos_read(0x04);
     uint8_t d=cmos_read(0x07),mo=cmos_read(0x08),y=cmos_read(0x09);
     if(!(stb&0x04)){s=bcd2bin(s);m=bcd2bin(m);h=bcd2bin(h);d=bcd2bin(d);mo=bcd2bin(mo);y=bcd2bin(y);}
-    /* 12h → 24h si bit 1 de stb non set */
     if(!(stb&0x02)&&(h&0x80)){h=(uint8_t)(((h&0x7F)+12)%24);}
     _rtc.s=s;_rtc.m=m;_rtc.h=h;_rtc.day=d;_rtc.mon=mo;
     _rtc.year=(uint16_t)(2000+y);
 }
+/* Poll sans blocage : si mise a jour en cours, conserve les valeurs actuelles */
+static void rtc_poll(void){
+    if(cmos_read(0x0A)&0x80)return;
+    uint8_t stb=cmos_read(0x0B);
+    uint8_t s=cmos_read(0x00),m=cmos_read(0x02),h=cmos_read(0x04);
+    uint8_t d=cmos_read(0x07),mo=cmos_read(0x08),y=cmos_read(0x09);
+    if(!(stb&0x04)){s=bcd2bin(s);m=bcd2bin(m);h=bcd2bin(h);d=bcd2bin(d);mo=bcd2bin(mo);y=bcd2bin(y);}
+    if(!(stb&0x02)&&(h&0x80)){h=(uint8_t)(((h&0x7F)+12)%24);}
+    _rtc.s=s;_rtc.m=m;_rtc.h=h;_rtc.day=d;_rtc.mon=mo;
+    _rtc.year=(uint16_t)(2000+y);
+}
+static int _blink=0; /* bascule chaque seconde via RTC */
 
 /* ============================================================
  * Creeper 8x8
@@ -152,7 +162,7 @@ static void cmd_ls(void){
     t_print("drwxr-xr-x  usr/ var/ home/ sys/\n");
 }
 static void cmd_time(void){
-    uint32_t s=BIOS_TICKS/18;
+    uint32_t s=(uint32_t)_rtc.h*3600+(uint32_t)_rtc.m*60+_rtc.s;
     char b[32];int o=0;
     b[o++]='U';b[o++]='p';b[o++]=':';b[o++]=' ';
     b[o++]='0'+s/3600/10;b[o++]='0'+s/3600%10;b[o++]='h';
@@ -485,6 +495,11 @@ static const sfcml_Color _fg_pr[4]={
 static const char* _fg_lbl[4]={"Blanc","Vert","Cyan","Jaune"};
 static const char* _bg_lbl[5]={"Bleu","Vert","Violet","Gris","Rouge"};
 static int _set_cat=0,_accent_sel=0,_bg_sel=0,_fg_sel=0;
+static int _veille_sel=0;   /* 0=Off 1=1min 2=2min 3=5min 4=10min */
+static int _inact_secs=0;
+static int _sleeping=0;
+static const int _veille_secs[5]={0,60,120,300,600};
+static const char* _veille_lbl[5]={"Off","1 min","2 min","5 min","10 min"};
 
 #define NICONS 8
 static const int   IC_Y[NICONS]={8,58,108,158,208,258,308,358};
@@ -543,7 +558,7 @@ static void draw_term(sfcml_Window* win,int wi){
     sfcml_drawHLine(win,w->x+1,iy-3,w->w-2,sfcml_rgb(50,50,60));
     sfcml_drawText(win,"root@myos:~$ ",tx,iy,C_PROMPT,C_WINBG);
     sfcml_drawText(win,_tinput,tx+13*8,iy,C_FG,C_WINBG);
-    if((BIOS_TICKS/9)%2==0)
+    if(_blink)
         sfcml_fillRect(win,sfcml_rect(tx+13*8+_tilen*8,iy,6,8),C_FG);
 }
 
@@ -574,8 +589,8 @@ static void draw_creep_win(sfcml_Window* win,int wi){
     AppWin* w=&_wins[wi];
     int cx=w->x+(w->w-72)/2,cy=w->y+TBAR_H+8;
     draw_creeper(win,cx,cy,9);
-    sfcml_Color lbl=((BIOS_TICKS/18)%2==0)?sfcml_rgb(94,124,22):sfcml_rgb(200,20,20);
-    const char* msg=(BIOS_TICKS/18)%2==0?"  Creeper!  ":"  Aw Man.. ";
+    sfcml_Color lbl=_blink?sfcml_rgb(94,124,22):sfcml_rgb(200,20,20);
+    const char* msg=_blink?"  Creeper!  ":"  Aw Man.. ";
     sfcml_drawText(win,msg,cx,cy+74,lbl,C_WINBG);
     sfcml_drawText(win,"[Esc pour fermer]",cx-16,cy+86,sfcml_rgb(80,80,80),C_WINBG);
 }
@@ -700,7 +715,7 @@ static void draw_code(sfcml_Window* win,int wi){
         /* Line content */
         draw_code_line(win,_code[line],sx+CODE_LNW+2,ly,linebg);
         /* Cursor */
-        if(line==_code_cl&&(BIOS_TICKS/9)%2==0){
+        if(line==_code_cl&&_blink){
             int cx=sx+CODE_LNW+2+_code_cc*8;
             sfcml_fillRect(win,sfcml_rect(cx,ly,2,8),sfcml_rgb(210,210,210));
         }
@@ -767,7 +782,7 @@ static void draw_word(sfcml_Window* win,int wi){
         if(line==_word_cl)sfcml_fillRect(win,sfcml_rect(px+1,ly-1,pw-2,10),cur_bg);
         sfcml_drawText(win,_word[line],tx,ly,txt,lbg);
         /* Cursor */
-        if(line==_word_cl&&(BIOS_TICKS/9)%2==0)
+        if(line==_word_cl&&_blink)
             sfcml_fillRect(win,sfcml_rect(tx+_word_cc*8,ly,1,9),sfcml_rgb(0,0,150));
     }
     /* Status bar */
@@ -997,8 +1012,8 @@ static void draw_settings(sfcml_Window* win,int wi){
     sfcml_drawText(win,"Parametres",sx+8,sy+8,sfcml_rgb(220,20,20),sbb);
     sfcml_drawHLine(win,sx,sy+22,sbw,sfcml_rgb(50,50,70));
 
-    const char* cats[4]={"  Apparence","  Systeme","  Applications","  A propos"};
-    for(int i=0;i<4;i++){
+    const char* cats[5]={"  Apparence","  Systeme","  Applications","  Alimentation","  A propos"};
+    for(int i=0;i<5;i++){
         int iy=sy+28+i*36;
         int sel=(_set_cat==i);
         int hov=(_mx>=sx&&_mx<sx+sbw&&_my>=iy&&_my<iy+36);
@@ -1082,6 +1097,39 @@ static void draw_settings(sfcml_Window* win,int wi){
             sfcml_drawText(win,vv[i],cx+116,iy+6,sfcml_rgb(220,220,240),rb);
         }
 
+    } else if(_set_cat==3){
+        /* --- Alimentation / Veille --- */
+        sfcml_drawText(win,"Alimentation",cx+10,y,sfcml_rgb(220,20,20),hbg);
+        sfcml_drawHLine(win,cx+10,y+12,cw-20,sfcml_rgb(50,50,70));
+        y+=26;
+        sfcml_drawText(win,"Mode veille (apres N minutes d'inactivite) :",cx+10,y,sfcml_rgb(160,160,190),hbg);
+        y+=16;
+        for(int i=0;i<5;i++){
+            int bx=cx+10+i*78;
+            int sel2=(_veille_sel==i);
+            sfcml_Color bb=sel2?C_TB:sfcml_rgb(28,28,44);
+            sfcml_fillRect(win,sfcml_rect(bx,y,70,28),bb);
+            sfcml_drawRect(win,sfcml_rect(bx,y,70,28),sel2?sfcml_rgb(120,180,255):sfcml_rgb(60,60,90));
+            sfcml_drawText(win,_veille_lbl[i],bx+8,y+10,SFCML_WHITE,bb);
+        }
+        y+=42;
+        sfcml_drawText(win,"Ecran de veille : horloge sur fond noir",cx+10,y,sfcml_rgb(120,120,150),hbg);
+        y+=14;
+        sfcml_drawText(win,"Toute touche ou clic reveil l'ecran.",cx+10,y,sfcml_rgb(120,120,150),hbg);
+        if(_veille_sel>0){
+            y+=22;
+            char info[48];
+            int lim=_veille_secs[_veille_sel]-_inact_secs;
+            if(lim<0)lim=0;
+            info[0]='V';info[1]='e';info[2]='i';info[3]='l';info[4]='l';info[5]='e';
+            info[6]=' ';info[7]='d';info[8]='a';info[9]='n';info[10]='s';info[11]=' ';
+            int o=12;
+            if(lim>=60){info[o++]='0'+lim/60/10;info[o++]='0'+lim/60%10;info[o++]='m';}
+            info[o++]='0'+(lim%60)/10;info[o++]='0'+lim%60%10;info[o++]='s';
+            info[o]='\0';
+            sfcml_drawText(win,info,cx+10,y,sfcml_rgb(80,160,255),hbg);
+        }
+
     } else if(_set_cat==2){
         /* --- Applications --- */
         sfcml_drawText(win,"Applications",cx+10,y,sfcml_rgb(220,20,20),hbg);
@@ -1103,7 +1151,7 @@ static void draw_settings(sfcml_Window* win,int wi){
             sfcml_drawText(win,ad[i],cx+40,iy+22,sfcml_rgb(130,130,155),rb);
         }
 
-    } else {
+    } else if(_set_cat==4){
         /* --- A propos --- */
         sfcml_drawText(win,"A propos de MyOS",cx+10,y,sfcml_rgb(220,20,20),hbg);
         sfcml_drawHLine(win,cx+10,y+12,cw-20,sfcml_rgb(50,50,70));
@@ -1137,9 +1185,19 @@ static void settings_click(int mx,int my){
     int sbw=140;
     /* Sidebar */
     if(mx>=sx&&mx<sx+sbw){
-        for(int i=0;i<4;i++){
+        for(int i=0;i<5;i++){
             int iy=sy+28+i*36;
             if(my>=iy&&my<iy+35){_set_cat=i;return;}
+        }
+        return;
+    }
+    /* Alimentation : clics sur les boutons veille */
+    if(_set_cat==3){
+        int cx2=sx+sbw+1;
+        int y2=sy+10+26+16; /* title+hline+label */
+        for(int i=0;i<5;i++){
+            int bx=cx2+10+i*78;
+            if(mx>=bx&&mx<bx+70&&my>=y2&&my<y2+28){_veille_sel=i;_inact_secs=0;return;}
         }
         return;
     }
@@ -1170,6 +1228,33 @@ static void settings_click(int mx,int my){
             _fg_sel=i;C_FG=_fg_pr[i];return;
         }
     }
+}
+
+/* ============================================================
+ * Economiseur d'ecran
+ * ============================================================ */
+static void draw_screensaver(sfcml_Window* win){
+    sfcml_fillRect(win,sfcml_rect(0,0,640,480),SFCML_BLACK);
+    /* HH:MM grande taille centree */
+    char hm[6];
+    hm[0]='0'+_rtc.h/10;hm[1]='0'+_rtc.h%10;hm[2]=':';
+    hm[3]='0'+_rtc.m/10;hm[4]='0'+_rtc.m%10;hm[5]='\0';
+    /* 5 chars * 8px * scale5 = 200px  => centre x=(640-200)/2=220 */
+    draw_big_text(win,hm,220,170,5,sfcml_rgb(0,140,255),SFCML_BLACK);
+    /* secondes */
+    char ss[3];ss[0]='0'+_rtc.s/10;ss[1]='0'+_rtc.s%10;ss[2]='\0';
+    draw_big_text(win,ss,298,245,3,sfcml_rgb(30,80,160),SFCML_BLACK);
+    /* date */
+    char dat[11];
+    dat[0]='0'+_rtc.day/10;dat[1]='0'+_rtc.day%10;dat[2]='/';
+    dat[3]='0'+_rtc.mon/10;dat[4]='0'+_rtc.mon%10;dat[5]='/';
+    dat[6]='0'+(_rtc.year/1000)%10;dat[7]='0'+(_rtc.year/100)%10;
+    dat[8]='0'+(_rtc.year/10)%10;dat[9]='0'+_rtc.year%10;dat[10]='\0';
+    sfcml_drawText(win,dat,272,290,sfcml_rgb(50,60,90),SFCML_BLACK);
+    /* epitech */
+    sfcml_drawText(win,"Epitech Technology",224,430,sfcml_rgb(30,10,10),SFCML_BLACK);
+    sfcml_drawText(win,"Cliquez pour reprendre",212,442,sfcml_rgb(25,25,40),SFCML_BLACK);
+    sfcml_present(win);
 }
 
 /* ============================================================
@@ -1318,7 +1403,7 @@ void kmain(void){
 
     sfcml_Event evt;
     int dirty=1;
-    uint32_t last_tick=0,last_rtc=0;
+    uint8_t last_s=255; /* derniere seconde vue, pour detecter le changement */
 
     while(sfcml_isOpen(win)){
         int got=0;
@@ -1399,11 +1484,21 @@ void kmain(void){
             }
         }
 
-        uint32_t ct=BIOS_TICKS;
-        if(ct-last_tick>=9){last_tick=ct;dirty=1;}
-        if(ct-last_rtc>=18){last_rtc=ct;rtc_read();}
-        if(got)dirty=1;
-        if(dirty){redraw(win);dirty=0;}
+        /* Mise a jour RTC sans blocage, chaque seconde */
+        rtc_poll();
+        if(_rtc.s!=last_s){
+            last_s=_rtc.s;
+            _blink=!_blink;
+            dirty=1;
+            if(!got){ /* pas d'activite cette seconde */
+                _inact_secs++;
+                if(_veille_sel>0&&_inact_secs>=_veille_secs[_veille_sel])
+                    _sleeping=1;
+            }
+        }
+        if(got){ _inact_secs=0; if(_sleeping){_sleeping=0;dirty=1;} dirty=1; }
+        if(_sleeping){ draw_screensaver(win); }
+        else if(dirty){ redraw(win);dirty=0; }
         else __asm__ volatile("pause");
     }
     cmd_reboot();
