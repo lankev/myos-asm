@@ -1,8 +1,9 @@
-#include <sfcml.h>
-#include <string.h>
-#include <stdlib.h>
-#include <stdio.h>
+#include "sfcml.h"
+#include "string.h"
+#include "stdlib.h"
+#include "stdio.h"
 #include "font8x8.h"
+#include "../net/net.h"
 
 void _putchar(char c) { (void)c; }
 #define BIOS_TICKS (*(volatile uint32_t*)0x046C)
@@ -148,7 +149,8 @@ static void cmd_reboot(void){
 static void cmd_help(void){
     t_print("Commandes: help clear about ls uname\n");
     t_print("  time ping sudo echo fortune creeper\n");
-    t_print("  color matrix reboot shutdown\n");
+    t_print("  color matrix reboot shutdown date\n");
+    t_print("  whoami hostname uptime ps mem net\n");
 }
 static void cmd_about(void){
     t_print("=== MyOS v0.1 - Epitech Edition ===\n");
@@ -209,6 +211,44 @@ static void handle_command(void){
     else if(!strcmp(inp,"matrix")){t_print("Wake up, Neo...\nThe Matrix has you.\n");}
     else if(!strcmp(inp,"shutdown")||!strcmp(inp,"poweroff")){t_print("Arret...\n");cmd_reboot();}
     else if(!strcmp(inp,"reboot")){t_print("Reboot...\n");cmd_reboot();}
+    else if(!strcmp(inp,"date")){
+        char b[32];int o=0;
+        b[o++]='0'+_rtc.day/10;b[o++]='0'+_rtc.day%10;b[o++]='/';
+        b[o++]='0'+_rtc.mon/10;b[o++]='0'+_rtc.mon%10;b[o++]='/';
+        b[o++]='0'+(_rtc.year/1000)%10;b[o++]='0'+(_rtc.year/100)%10;
+        b[o++]='0'+(_rtc.year/10)%10;b[o++]='0'+_rtc.year%10;b[o++]=' ';
+        b[o++]='0'+_rtc.h/10;b[o++]='0'+_rtc.h%10;b[o++]=':';
+        b[o++]='0'+_rtc.m/10;b[o++]='0'+_rtc.m%10;b[o++]=':';
+        b[o++]='0'+_rtc.s/10;b[o++]='0'+_rtc.s%10;b[o++]='\n';b[o]='\0';
+        t_print(b);
+    }
+    else if(!strcmp(inp,"whoami"))t_print("root\n");
+    else if(!strcmp(inp,"hostname"))t_print("myos.epitech.eu\n");
+    else if(!strcmp(inp,"uptime"))t_print("up 0 days, 0:00:00\n");
+    else if(!strcmp(inp,"ps")){
+        t_print("PID  STAT  CMD\n");
+        t_print("  1  S     init\n");
+        t_print("  2  S     kmain\n");
+        t_print("  3  S     myos-wm\n");
+        t_print("  4  R     terminal\n");
+    }
+    else if(!strcmp(inp,"mem")){
+        t_print("Heap base : 0x400000  size: 4MB\n");
+        t_print("Kernel    : 0x010000  size: ~66KB\n");
+        t_print("Backbuf   : 0x300000  size: 900KB\n");
+        t_print("VGA font  : 0x006000  size: 2KB\n");
+    }
+    else if(!strcmp(inp,"net")||!strcmp(inp,"ifconfig")){
+        if(net_ok){
+            t_print("eth0  UP\n");
+            t_print("  IP  : 10.0.2.15\n");
+            t_print("  GW  : 10.0.2.2\n");
+            t_print("  DNS : 10.0.2.3\n");
+            t_print("  NIC : RTL8139\n");
+        }else{
+            t_print("eth0  DOWN (reseau non disponible)\n");
+        }
+    }
     else if(inp[0]){t_print(inp);t_print(": commande introuvable\n");}
     _tilen=0;_tinput[0]='\0';
 }
@@ -434,7 +474,7 @@ static void word_text(char ch){
 
 typedef struct{int x,y,w,h,visible,minimized;const char* title;}AppWin;
 
-#define NW         7
+#define NW         10
 #define W_TERM     0
 #define W_ABOUT    1
 #define W_CREEP    2
@@ -442,6 +482,9 @@ typedef struct{int x,y,w,h,visible,minimized;const char* title;}AppWin;
 #define W_CODE     4
 #define W_WORD     5
 #define W_SETTINGS 6
+#define W_BROWSER  7
+#define W_CALC     8
+#define W_FILES    9
 
 static AppWin _wins[NW]={
     {70, 36, 504,320,0,0,"Terminal - root@myos"},
@@ -451,8 +494,11 @@ static AppWin _wins[NW]={
     {1,  1,  638,447,0,0,"Epitech Code Editor"},
     {1,  1,  638,447,0,0,"Epitech Word"},
     {40, 20, 560,410,0,0,"Parametres"},
+    {45, 0,  595,449,0,0,"MyBrowser"},
+    {190,60, 240,300,0,0,"Calculatrice"},
+    {50, 20, 540,400,0,0,"Gestionnaire de fichiers"},
 };
-static int _z[NW]={0,1,2,3,4,5,6};
+static int _z[NW]={0,1,2,3,4,5,6,7,8,9};
 static int _drag_win=-1,_drag_ox,_drag_oy;
 static int _focus=-1;
 
@@ -469,7 +515,6 @@ static void win_open(int idx){
     if(idx==W_CODE&&!_code_inited){code_init();_code_inited=1;}
     if(idx==W_WORD&&!_word_inited){word_init();_word_inited=1;}
 }
-static void win_front7(int idx){win_front(idx);}
 
 /* ============================================================
  * Etat bureau
@@ -500,10 +545,114 @@ static int _inact_secs=0;
 static int _sleeping=0;
 static const int _veille_secs[5]={0,60,120,300,600};
 static const char* _veille_lbl[5]={"Off","1 min","2 min","5 min","10 min"};
+static int _ss_id=0;        /* economiseur actif: 0=horloge 1=arbre 2=mandelbrot 3=etoiles 4=matrix */
+static int _mb_row=480;     /* etat mandelbrot: ligne en cours */
+static int _ss_si=0;        /* etat etoiles: initialise */
+static int _mc_i=0;         /* etat matrix: initialise */
 
-#define NICONS 8
-static const int   IC_Y[NICONS]={8,58,108,158,208,258,308,358};
-static const char* IC_LBL[NICONS]={"Terminal","Paint","Code","Word","Creeper","A propos","Reboot","Params"};
+/* ---- Navigateur ---- */
+#define BURL_MAX 60
+static char _burl[BURL_MAX+1];
+static int  _burl_len=0,_burl_foc=0,_bpage=0;
+static char _bsearch[BURL_MAX+1];
+static int  _bsearch_len=0,_bsearch_foc=0;
+static char _net_buf[4096];
+static int  _net_len=0;
+
+static char _calc_disp[24]="0";
+static double _calc_acc=0.0;
+static double _calc_cur=0.0;
+static char   _calc_op=0;
+static int    _calc_new=1;
+static int    _calc_err=0;
+
+static int _fi_sel=0,_fi_dir=0;
+static int   _fi_edit=0;
+#define FI_ER 20
+#define FI_EC 58
+static char  _fi_ebuf[FI_ER][FI_EC+1];
+static int   _fi_enl=0,_fi_ecl=0,_fi_ecc=0,_fi_esc=0;
+static const char* _fi_dirs[]={"C:\\","C:\\Windows","C:\\Windows\\System32","C:\\Users","C:\\Users\\root","C:\\MyOS","C:\\MyOS\\boot","C:\\MyOS\\kernel"};
+static const char* _fi_files[][6]={
+    {"Windows","Users","MyOS","Program Files","BOOTMGR","pagefile.sys"},
+    {"System32","SysWOW64","explorer.exe","notepad.exe","cmd.exe","winver.exe"},
+    {"kernel32.dll","ntdll.dll","hal.dll","drivers","config","LogFiles"},
+    {"root","Public","Default","All Users","desktop.ini",""},
+    {"Desktop","Documents","Downloads","Music","Pictures","Videos"},
+    {"boot","kernel","libc","sfcml","net","Makefile"},
+    {"boot.bin","minegrub.bin","stage1","stage2","",""},
+    {"kmain.c","kmain.o","kernel.bin","kernel.elf","kernel.ld","crt0.asm"},
+};
+
+static const char* _bpu[5]={"myos://newtab","epitech.eu","google.com","myos://info","github.com"};
+
+static void _bnav(int p){
+    _bsearch_foc=0;
+    if(p==5){
+        const char*pre="google.com/?q=";
+        int l=0,i=0;
+        while(pre[i]&&l<BURL_MAX)_burl[l++]=pre[i++];
+        i=0;while(_bsearch[i]&&l<BURL_MAX)_burl[l++]=_bsearch[i++];
+        _burl[l]='\0';_burl_len=l;_burl_foc=0;_bpage=5;
+        return;
+    }
+    const char*u=_bpu[p<5?p:0];
+    int l=0;while(u[l]&&l<BURL_MAX){_burl[l]=u[l];l++;}
+    _burl[l]='\0';_burl_len=l;_burl_foc=0;_bpage=p;
+}
+static int html_strip(char*buf,int len){
+    int in_tag=0,skip=0,oi=0,last_sp=1;
+    char tn[8];int tni=0;
+    for(int i=0;i<len;i++){
+        char c=buf[i];
+        if(!in_tag&&c=='<'){
+            in_tag=1;tni=0;
+            if(i+1<len&&buf[i+1]=='/'){skip=0;tni=1;tn[0]='/';}
+        }else if(in_tag&&c=='>'){
+            in_tag=0;
+            tn[tni<7?tni:7]='\0';
+            if(tn[0]!='/'&&(tn[0]=='s'||tn[0]=='S'))
+                if((tn[1]=='c'||tn[1]=='C')||(tn[1]=='t'||tn[1]=='T'))skip=1;
+            if(!skip&&!last_sp){buf[oi++]='\n';last_sp=1;}
+        }else if(in_tag){
+            if(tni<7&&c!=' '&&c!='\t'&&c!='\n')tn[tni++]=c;
+        }else if(!skip){
+            if(c==' '||c=='\t'){
+                if(!last_sp){buf[oi++]=' ';last_sp=1;}
+            }else if(c=='\n'||c=='\r'){
+                if(!last_sp){buf[oi++]='\n';last_sp=1;}
+            }else if(c=='&'){
+                if(i+4<len&&buf[i+1]=='a'&&buf[i+2]=='m'&&buf[i+3]=='p'&&buf[i+4]==';'){buf[oi++]='&';i+=4;last_sp=0;}
+                else if(i+3<len&&buf[i+1]=='l'&&buf[i+2]=='t'&&buf[i+3]==';'){buf[oi++]='<';i+=3;last_sp=0;}
+                else if(i+3<len&&buf[i+1]=='g'&&buf[i+2]=='t'&&buf[i+3]==';'){buf[oi++]='>';i+=3;last_sp=0;}
+                else if(i+5<len&&buf[i+1]=='n'&&buf[i+2]=='b'&&buf[i+3]=='s'&&buf[i+4]=='p'&&buf[i+5]==';'){if(!last_sp){buf[oi++]=' ';last_sp=1;}i+=5;}
+                else{buf[oi++]=c;last_sp=0;}
+            }else if((uint8_t)c>=32&&(uint8_t)c<127){
+                buf[oi++]=c;last_sp=0;
+            }
+        }
+    }
+    buf[oi]='\0';
+    return oi;
+}
+
+static void _burl_nav(void){
+    if(strstr(_burl,"epitech")){_bnav(1);return;}
+    if(strstr(_burl,"google")) {_bnav(2);return;}
+    if(strstr(_burl,"github")) {_bnav(4);return;}
+    if(strstr(_burl,"info")||strstr(_burl,"myos")){_bnav(3);return;}
+    if(net_ok){
+        _net_len=net_http_get(_burl,_net_buf,(int)sizeof(_net_buf)-1);
+        if(_net_len<0){_net_len=0;_net_buf[0]='\0';}
+        else _net_len=html_strip(_net_buf,_net_len);
+        _bsearch_foc=0;_burl_foc=0;_bpage=6;return;
+    }
+    _bpage=0;
+}
+
+#define NICONS 9
+static const int   IC_Y[NICONS]={8,58,108,158,208,258,308,358,408};
+static const char* IC_LBL[NICONS]={"Terminal","Paint","Code","Word","Creeper","A propos","Reboot","Params","Browser"};
 #define IC_X  6
 #define IC_SZ 32
 
@@ -533,12 +682,23 @@ static void draw_frame(sfcml_Window* win,int wi){
                         :sfcml_rgb(75,75,100);
     sfcml_fillRect(win,sfcml_rect(w->x+4,w->y+4,w->w,w->h),sfcml_rgb(0,0,0));
     sfcml_fillRect(win,sfcml_rect(w->x,w->y,w->w,w->h),C_WINBG);
-    sfcml_fillRect(win,sfcml_rect(w->x,w->y,w->w,TBAR_H),tbar);
+    for(int gy=0;gy<TBAR_H;gy++){
+        int t=gy*100/TBAR_H;
+        sfcml_Color gc=sfcml_rgb(
+            (uint8_t)((int)tbar.r+(10-t*20/100)<0?0:(int)tbar.r+(10-t*20/100)>255?255:(int)tbar.r+(10-t*20/100)),
+            (uint8_t)((int)tbar.g+(10-t*20/100)<0?0:(int)tbar.g+(10-t*20/100)>255?255:(int)tbar.g+(10-t*20/100)),
+            (uint8_t)((int)tbar.b+(10-t*20/100)<0?0:(int)tbar.b+(10-t*20/100)>255?255:(int)tbar.b+(10-t*20/100))
+        );
+        sfcml_drawHLine(win,w->x,w->y+gy,w->w,gc);
+    }
     sfcml_drawText(win,w->title,w->x+6,w->y+7,SFCML_WHITE,tbar);
     sfcml_fillRect(win,sfcml_rect(w->x+w->w-2*BTN_W-8,w->y+4,BTN_W,BTN_H),sfcml_rgb(200,160,0));
     sfcml_drawHLine(win,w->x+w->w-2*BTN_W-6,w->y+11,BTN_W-4,SFCML_WHITE);
     sfcml_fillRect(win,sfcml_rect(w->x+w->w-BTN_W-4,w->y+4,BTN_W,BTN_H),sfcml_rgb(196,40,30));
     sfcml_drawText(win,"x",w->x+w->w-BTN_W-1,w->y+5,SFCML_WHITE,sfcml_rgb(196,40,30));
+    int gx=w->x+w->w-10,gy2=w->y+w->h-10;
+    sfcml_drawLine(win,gx,w->y+w->h-2,w->x+w->w-2,gy2,sfcml_rgb(100,100,120));
+    sfcml_drawLine(win,gx+4,w->y+w->h-2,w->x+w->w-2,gy2+4,sfcml_rgb(100,100,120));
     sfcml_drawRect(win,sfcml_rect(w->x,w->y,w->w,w->h),bdr);
 }
 
@@ -852,7 +1012,7 @@ static void draw_icons(sfcml_Window* win){
             sfcml_drawCircle(win,ix+16,iy+20,10,hov?sfcml_rgb(255,80,80):sfcml_rgb(200,50,50));
             sfcml_fillRect(win,sfcml_rect(ix+14,iy+5,4,10),hov?sfcml_rgb(255,80,80):sfcml_rgb(200,50,50));
             break;
-        default: /* Parametres (engrenage) */
+        case 7: /* Parametres (engrenage) */
             sfcml_fillRect(win,sfcml_rect(ix,iy,IC_SZ,IC_SZ),sfcml_rgb(30,30,44));
             sfcml_drawRect(win,sfcml_rect(ix,iy,IC_SZ,IC_SZ),hov?SFCML_WHITE:sfcml_rgb(70,70,100));
             sfcml_drawCircle(win,ix+16,iy+16,7,hov?sfcml_rgb(200,200,255):sfcml_rgb(150,150,200));
@@ -861,6 +1021,14 @@ static void draw_icons(sfcml_Window* win){
             sfcml_fillRect(win,sfcml_rect(ix+14,iy+24,4,4),hov?sfcml_rgb(200,200,255):sfcml_rgb(150,150,200));
             sfcml_fillRect(win,sfcml_rect(ix+4,iy+14,4,4),hov?sfcml_rgb(200,200,255):sfcml_rgb(150,150,200));
             sfcml_fillRect(win,sfcml_rect(ix+24,iy+14,4,4),hov?sfcml_rgb(200,200,255):sfcml_rgb(150,150,200));
+            break;
+        default: /* Navigateur */
+            sfcml_fillRect(win,sfcml_rect(ix,iy,IC_SZ,IC_SZ),sfcml_rgb(248,249,250));
+            sfcml_drawRect(win,sfcml_rect(ix,iy,IC_SZ,IC_SZ),hov?sfcml_rgb(66,133,244):sfcml_rgb(180,180,200));
+            sfcml_fillRect(win,sfcml_rect(ix+2,iy+2,IC_SZ-4,6),sfcml_rgb(66,133,244));
+            sfcml_fillRect(win,sfcml_rect(ix+2,iy+10,10,IC_SZ-12),sfcml_rgb(234,67,53));
+            sfcml_fillRect(win,sfcml_rect(ix+14,iy+10,IC_SZ-16,IC_SZ-12),sfcml_rgb(52,168,83));
+            sfcml_drawText(win,"www",ix+4,iy+14,SFCML_WHITE,sfcml_rgb(52,168,83));
             break;
         }
         sfcml_Color lbg=sel?sfcml_rgb(30,60,180):C_DK;
@@ -873,15 +1041,15 @@ static void draw_icons(sfcml_Window* win){
  * ============================================================ */
 #define SM_W   172
 #define SM_IH   22
-#define SM_N    12
+#define SM_N    13
 #define SM_H   (SM_N*SM_IH+8)
 #define SM_Y   (450-SM_H)
 
 static const char* SM_LBL[SM_N]={
     "  Terminal","  Creeper!","  A propos","  ---------",
-    "  Paint","  Code Editor","  Word",
-    "  Parametres",
-    "  ---------","  Redemarrer","  Eteindre","  ---------",
+    "  Paint","  Code Editor","  Word","  Navigateur",
+    "  Calculatrice","  Fichiers","  Parametres",
+    "  ---------","  Redemarrer",
 };
 
 static void draw_smenu(sfcml_Window* win){
@@ -911,8 +1079,11 @@ static void smenu_click(int mx,int my){
     else if(item==4)win_open(W_PAINT);
     else if(item==5)win_open(W_CODE);
     else if(item==6)win_open(W_WORD);
-    else if(item==7)win_open(W_SETTINGS);
-    else if(item==9||item==10)cmd_reboot();
+    else if(item==7){win_open(W_BROWSER);_bnav(0);}
+    else if(item==8)win_open(W_CALC);
+    else if(item==9)win_open(W_FILES);
+    else if(item==10)win_open(W_SETTINGS);
+    else if(item==12)cmd_reboot();
 }
 
 /* ============================================================
@@ -920,9 +1091,9 @@ static void smenu_click(int mx,int my){
  * ============================================================ */
 #define RC_W  150
 #define RC_IH  18
-#define RC_N    7
+#define RC_N    8
 static const char* RC_LBL[RC_N]={
-    " Terminal"," Paint"," Code Editor"," ---------"," Parametres"," A propos"," Redemarrer",
+    " Terminal"," Paint"," Navigateur"," Calculatrice"," ---------"," Parametres"," A propos"," Redemarrer",
 };
 static void draw_rcmenu(sfcml_Window* win){
     int mh=RC_N*RC_IH+4;
@@ -950,10 +1121,11 @@ static void rcmenu_click(int mx,int my){
     int item=(my-y0-2)/RC_IH;
     if(item==0)win_open(W_TERM);
     else if(item==1)win_open(W_PAINT);
-    else if(item==2)win_open(W_CODE);
-    else if(item==4)win_open(W_SETTINGS);
-    else if(item==5)win_open(W_ABOUT);
-    else if(item==6)cmd_reboot();
+    else if(item==2){win_open(W_BROWSER);_bnav(0);}
+    else if(item==3)win_open(W_CALC);
+    else if(item==5)win_open(W_SETTINGS);
+    else if(item==6)win_open(W_ABOUT);
+    else if(item==7)cmd_reboot();
 }
 
 /* ============================================================
@@ -961,14 +1133,25 @@ static void rcmenu_click(int mx,int my){
  * ============================================================ */
 #define TB_BW 82  /* button width */
 static void draw_taskbar(sfcml_Window* win){
-    sfcml_fillRect(win,sfcml_rect(0,449,640,31),C_TB);
+    sfcml_Color tb2=sfcml_rgb((uint8_t)((int)C_TB.r*8/10),(uint8_t)((int)C_TB.g*8/10),(uint8_t)((int)C_TB.b*8/10));
+    (void)tb2;
+    for(int i=0;i<31;i++){
+        int t=i*100/31;
+        sfcml_Color gc=sfcml_rgb(
+            (uint8_t)((int)C_TB.r*(100-t*30/100)/100),
+            (uint8_t)((int)C_TB.g*(100-t*30/100)/100),
+            (uint8_t)((int)C_TB.b*(100-t*30/100)/100));
+        sfcml_drawHLine(win,0,449+i,640,gc);
+    }
     sfcml_drawHLine(win,0,449,640,sfcml_rgb(0,90,170));
-    /* Start */
     sfcml_Color sc=_start_open?sfcml_rgb(160,5,5):sfcml_rgb(215,20,20);
     sfcml_fillRect(win,sfcml_rect(2,451,84,26),sc);
     sfcml_drawRect(win,sfcml_rect(2,451,84,26),sfcml_rgb(120,4,4));
-    sfcml_drawText(win,"Demarrer",8,460,SFCML_WHITE,sc);
-    /* Window buttons */
+    sfcml_fillRect(win,sfcml_rect(6,455,7,7),sfcml_rgb(255,80,80));
+    sfcml_fillRect(win,sfcml_rect(15,455,7,7),sfcml_rgb(80,200,80));
+    sfcml_fillRect(win,sfcml_rect(6,464,7,7),sfcml_rgb(80,80,255));
+    sfcml_fillRect(win,sfcml_rect(15,464,7,7),sfcml_rgb(255,200,0));
+    sfcml_drawText(win,"Start",26,460,SFCML_WHITE,sc);
     int bx=88;
     for(int i=0;i<NW;i++){
         if(!_wins[i].visible)continue;
@@ -976,23 +1159,33 @@ static void draw_taskbar(sfcml_Window* win){
         sfcml_Color bc=_wins[i].minimized?sfcml_rgb(50,50,68):(foc?sfcml_rgb(0,100,200):sfcml_rgb(38,38,58));
         sfcml_fillRect(win,sfcml_rect(bx,452,TB_BW,24),bc);
         sfcml_drawRect(win,sfcml_rect(bx,452,TB_BW,24),sfcml_rgb(80,80,110));
+        if(foc)sfcml_drawHLine(win,bx,452,TB_BW,sfcml_rgb(100,180,255));
         sfcml_Color tc=_wins[i].minimized?sfcml_rgb(140,140,160):SFCML_WHITE;
         sfcml_drawText(win,_wins[i].title,bx+4,460,tc,bc);
         bx+=TB_BW+2;
     }
-    /* Horloge RTC */
+    int tx=480;
+    sfcml_Color nicol=net_ok?sfcml_rgb(80,200,80):sfcml_rgb(160,160,160);
+    sfcml_fillRect(win,sfcml_rect(tx,455,18,16),C_TB);
+    sfcml_fillRect(win,sfcml_rect(tx+2,464,14,4),nicol);
+    sfcml_fillRect(win,sfcml_rect(tx+5,459,8,6),nicol);
+    sfcml_fillRect(win,sfcml_rect(tx+8,455,2,5),nicol);
+    tx+=22;
+    sfcml_fillRect(win,sfcml_rect(tx,457,6,12),C_TB);
+    sfcml_fillRect(win,sfcml_rect(tx,461,4,4),sfcml_rgb(180,180,200));
+    sfcml_fillTriangle(win,tx+4,457,tx+4,469,tx+10,463,sfcml_rgb(180,180,200));
+    tx+=18;
     char clk[9];
     clk[0]='0'+_rtc.h/10;clk[1]='0'+_rtc.h%10;clk[2]=':';
     clk[3]='0'+_rtc.m/10;clk[4]='0'+_rtc.m%10;clk[5]=':';
     clk[6]='0'+_rtc.s/10;clk[7]='0'+_rtc.s%10;clk[8]='\0';
-    /* Date  DD/MM/YYYY */
     char dat[11];
-    dat[0]='0'+_rtc.day/10; dat[1]='0'+_rtc.day%10; dat[2]='/';
-    dat[3]='0'+_rtc.mon/10; dat[4]='0'+_rtc.mon%10; dat[5]='/';
-    dat[6]='0'+(_rtc.year/1000)%10; dat[7]='0'+(_rtc.year/100)%10;
-    dat[8]='0'+(_rtc.year/10)%10;   dat[9]='0'+_rtc.year%10; dat[10]='\0';
-    sfcml_drawText(win,dat, 490,453,sfcml_rgb(180,180,210),C_TB);
-    sfcml_drawText(win,clk, 494,463,SFCML_WHITE,C_TB);
+    dat[0]='0'+_rtc.day/10;dat[1]='0'+_rtc.day%10;dat[2]='/';
+    dat[3]='0'+_rtc.mon/10;dat[4]='0'+_rtc.mon%10;dat[5]='/';
+    dat[6]='0'+(_rtc.year/1000)%10;dat[7]='0'+(_rtc.year/100)%10;
+    dat[8]='0'+(_rtc.year/10)%10;dat[9]='0'+_rtc.year%10;dat[10]='\0';
+    sfcml_drawText(win,dat,tx+4,453,sfcml_rgb(180,180,210),C_TB);
+    sfcml_drawText(win,clk,tx+8,463,SFCML_WHITE,C_TB);
 }
 
 /* ============================================================
@@ -1113,9 +1306,18 @@ static void draw_settings(sfcml_Window* win,int wi){
             sfcml_drawText(win,_veille_lbl[i],bx+8,y+10,SFCML_WHITE,bb);
         }
         y+=42;
-        sfcml_drawText(win,"Ecran de veille : horloge sur fond noir",cx+10,y,sfcml_rgb(120,120,150),hbg);
+        sfcml_drawText(win,"Economiseur d'ecran :",cx+10,y,sfcml_rgb(160,160,190),hbg);
         y+=14;
-        sfcml_drawText(win,"Toute touche ou clic reveil l'ecran.",cx+10,y,sfcml_rgb(120,120,150),hbg);
+        const char* ssn[5]={"Horloge","Arbre","Fractal","Etoiles","Matrix"};
+        for(int i=0;i<5;i++){
+            int bx=cx+10+i*78;
+            sfcml_Color bb2=(_ss_id==i)?C_TB:sfcml_rgb(28,28,44);
+            sfcml_fillRect(win,sfcml_rect(bx,y,70,26),bb2);
+            sfcml_drawRect(win,sfcml_rect(bx,y,70,26),(_ss_id==i)?sfcml_rgb(120,180,255):sfcml_rgb(60,60,90));
+            sfcml_drawText(win,ssn[i],bx+6,y+9,SFCML_WHITE,bb2);
+        }
+        y+=38;
+        sfcml_drawText(win,"Toute touche ou clic reveille l'ecran.",cx+10,y,sfcml_rgb(100,100,130),hbg);
         if(_veille_sel>0){
             y+=22;
             char info[48];
@@ -1195,9 +1397,21 @@ static void settings_click(int mx,int my){
     if(_set_cat==3){
         int cx2=sx+sbw+1;
         int y2=sy+10+26+16; /* title+hline+label */
+        /* Veille */
         for(int i=0;i<5;i++){
             int bx=cx2+10+i*78;
             if(mx>=bx&&mx<bx+70&&my>=y2&&my<y2+28){_veille_sel=i;_inact_secs=0;return;}
+        }
+        y2+=42+14; /* apres veille: label economiseur */
+        /* Economiseur */
+        for(int i=0;i<5;i++){
+            int bx=cx2+10+i*78;
+            if(mx>=bx&&mx<bx+70&&my>=y2&&my<y2+26){
+                _ss_id=i;
+                /* reset etat de l'economiseur courant */
+                _mb_row=480;_ss_si=0;_mc_i=0;
+                return;
+            }
         }
         return;
     }
@@ -1233,28 +1447,810 @@ static void settings_click(int mx,int my){
 /* ============================================================
  * Economiseur d'ecran
  * ============================================================ */
-static void draw_screensaver(sfcml_Window* win){
+/* ============================================================
+ * SIN/COS entiers (degres, retourne sin*100)
+ * ============================================================ */
+static const uint8_t _s90[91]={
+    0,2,3,5,7,9,10,12,14,16,17,19,21,22,24,26,28,29,31,33,
+    34,36,37,39,41,42,44,45,47,48,50,51,53,54,56,57,59,60,62,63,
+    64,66,67,68,69,71,72,73,74,75,77,78,79,80,81,82,83,84,85,86,
+    87,87,88,89,90,91,91,92,93,93,94,95,95,96,96,97,97,97,98,98,
+    98,99,99,99,99,100,100,100,100,100,100
+};
+static int _isin(int a){
+    a=((a%360)+360)%360;
+    if(a<=90) return _s90[a];
+    if(a<=180)return _s90[180-a];
+    if(a<=270)return -(int)_s90[a-180];
+    return -(int)_s90[360-a];
+}
+static int _icos(int a){return _isin(a+90);}
+
+/* ============================================================
+ * SS0 - Horloge flottante
+ * ============================================================ */
+static int _clk_x=220,_clk_y=170,_clk_vx=1,_clk_vy=1;
+static void draw_ss_clock(sfcml_Window*win){
     sfcml_fillRect(win,sfcml_rect(0,0,640,480),SFCML_BLACK);
-    /* HH:MM grande taille centree */
     char hm[6];
     hm[0]='0'+_rtc.h/10;hm[1]='0'+_rtc.h%10;hm[2]=':';
     hm[3]='0'+_rtc.m/10;hm[4]='0'+_rtc.m%10;hm[5]='\0';
-    /* 5 chars * 8px * scale5 = 200px  => centre x=(640-200)/2=220 */
-    draw_big_text(win,hm,220,170,5,sfcml_rgb(0,140,255),SFCML_BLACK);
-    /* secondes */
+    _clk_x+=_clk_vx;_clk_y+=_clk_vy;
+    if(_clk_x<0||_clk_x>440)_clk_vx=-_clk_vx; /* 200px wide=5chars*8*5 */
+    if(_clk_y<0||_clk_y>440)_clk_vy=-_clk_vy;
+    draw_big_text(win,hm,_clk_x,_clk_y,5,sfcml_rgb(0,140,255),SFCML_BLACK);
     char ss[3];ss[0]='0'+_rtc.s/10;ss[1]='0'+_rtc.s%10;ss[2]='\0';
-    draw_big_text(win,ss,298,245,3,sfcml_rgb(30,80,160),SFCML_BLACK);
-    /* date */
+    draw_big_text(win,ss,_clk_x+78,_clk_y+48,3,sfcml_rgb(20,70,160),SFCML_BLACK);
     char dat[11];
     dat[0]='0'+_rtc.day/10;dat[1]='0'+_rtc.day%10;dat[2]='/';
     dat[3]='0'+_rtc.mon/10;dat[4]='0'+_rtc.mon%10;dat[5]='/';
     dat[6]='0'+(_rtc.year/1000)%10;dat[7]='0'+(_rtc.year/100)%10;
     dat[8]='0'+(_rtc.year/10)%10;dat[9]='0'+_rtc.year%10;dat[10]='\0';
-    sfcml_drawText(win,dat,272,290,sfcml_rgb(50,60,90),SFCML_BLACK);
-    /* epitech */
-    sfcml_drawText(win,"Epitech Technology",224,430,sfcml_rgb(30,10,10),SFCML_BLACK);
-    sfcml_drawText(win,"Cliquez pour reprendre",212,442,sfcml_rgb(25,25,40),SFCML_BLACK);
+    sfcml_drawText(win,dat,_clk_x+10,_clk_y+72,sfcml_rgb(40,50,80),SFCML_BLACK);
     sfcml_present(win);
+}
+
+/* ============================================================
+ * SS1 - Arbre fractal recursif
+ * ============================================================ */
+static int _tree_t=0;
+static void _branch(sfcml_Window*win,int x,int y,int ang,int len,int dep){
+    if(dep==0||len<3)return;
+    int x2=x+_icos(ang)*len/100;
+    int y2=y-_isin(ang)*len/100;
+    if(x2<0)x2=0;if(x2>639)x2=639;
+    if(y2<0)y2=0;if(y2>479)y2=479;
+    sfcml_Color c;
+    if(dep>=6)      c=sfcml_rgb((uint8_t)(140-(8-dep)*15),60,15);
+    else if(dep>=3) c=sfcml_rgb(20,(uint8_t)(60+dep*25),15);
+    else            c=sfcml_rgb(80,220,30);
+    sfcml_drawLine(win,x,y,x2,y2,c);
+    int sp=22+_isin((_tree_t*3)%360)*18/100; /* oscillation du vent */
+    _branch(win,x2,y2,ang-sp,len*66/100,dep-1);
+    _branch(win,x2,y2,ang+sp,len*66/100,dep-1);
+}
+static void draw_ss_tree(sfcml_Window*win){
+    sfcml_fillRect(win,sfcml_rect(0,0,640,480),sfcml_rgb(0,4,2));
+    sfcml_fillRect(win,sfcml_rect(0,458,640,22),sfcml_rgb(5,18,5));
+    _tree_t=(_tree_t+1)%360;
+    _branch(win,320,458,90,78,8); /* 8 niveaux de recursion */
+    sfcml_present(win);
+}
+
+/* ============================================================
+ * SS2 - Mandelbrot (rendu progressif + zoom)
+ * ============================================================ */
+static float _mb_cx=-0.5f,_mb_cy=0.0f,_mb_sc=3.5f/480.0f;
+static int   _mb_zc=0;
+static void draw_ss_mandelbrot(sfcml_Window*win){
+    if(_mb_row>=480){
+        /* Zoom vers l'elephant valley: (-0.7436, 0.1319) */
+        _mb_cx=_mb_cx*0.85f+(-0.7436f)*0.15f;
+        _mb_cy=_mb_cy*0.85f+( 0.1319f)*0.15f;
+        _mb_sc*=0.78f;
+        _mb_zc++;
+        if(_mb_zc>18){_mb_cx=-0.5f;_mb_cy=0.0f;_mb_sc=3.5f/480.0f;_mb_zc=0;}
+        _mb_row=0;
+    }
+    /* Rend 24 lignes par appel */
+    int rend=_mb_row+24; if(rend>480)rend=480;
+    for(int row=_mb_row;row<rend;row++){
+        for(int col=0;col<640;col++){
+            float x0=_mb_cx+(col-320)*_mb_sc;
+            float y0=_mb_cy+(row-240)*_mb_sc;
+            float x=0.0f,y=0.0f;
+            int it=0;
+            while(x*x+y*y<=4.0f&&it<48){
+                float xt=x*x-y*y+x0;
+                y=2.0f*x*y+y0;
+                x=xt;it++;
+            }
+            sfcml_Color c;
+            if(it==48){c=SFCML_BLACK;}
+            else{
+                uint8_t t=(uint8_t)(it*5);
+                uint8_t u=(uint8_t)((48-it)*5);
+                c=sfcml_rgb(t,(uint8_t)(it*3%256),u);
+            }
+            sfcml_drawPixel(win,col,row,c);
+        }
+    }
+    _mb_row=rend;
+    sfcml_present(win);
+}
+
+/* ============================================================
+ * SS3 - Champ d'etoiles 3D
+ * ============================================================ */
+#define SS_STARS 64
+static int16_t _ssx[SS_STARS],_ssy[SS_STARS];
+static uint8_t _ssz[SS_STARS];
+static uint32_t _ss_rng=12345;
+static uint32_t ss_rand(void){_ss_rng=_ss_rng*1664525+1013904223;return _ss_rng;}
+static void _star_rst(int i){
+    _ssx[i]=(int16_t)((ss_rand()%640)-320);
+    _ssy[i]=(int16_t)((ss_rand()%480)-240);
+    _ssz[i]=(uint8_t)(180+ss_rand()%75);
+}
+static void draw_ss_stars(sfcml_Window*win){
+    sfcml_fillRect(win,sfcml_rect(0,0,640,480),SFCML_BLACK);
+    if(!_ss_si){for(int i=0;i<SS_STARS;i++)_star_rst(i);_ss_si=1;}
+    for(int i=0;i<SS_STARS;i++){
+        if(_ssz[i]<=2){_star_rst(i);continue;}
+        int sx=_ssx[i]*200/_ssz[i]+320;
+        int sy=_ssy[i]*200/_ssz[i]+240;
+        if(sx<0||sx>=640||sy<0||sy>=480){_star_rst(i);continue;}
+        uint8_t br=(uint8_t)(255-_ssz[i]);
+        uint8_t sz=(uint8_t)(3-_ssz[i]/90); if(sz<1)sz=1;
+        sfcml_fillRect(win,sfcml_rect(sx,sy,(int)sz,(int)sz),sfcml_rgb(br,br,br));
+        _ssz[i]-=3;
+    }
+    sfcml_present(win);
+}
+
+/* ============================================================
+ * SS4 - Matrix (pluie de caracteres)
+ * ============================================================ */
+#define SS_MC 80
+static uint8_t _mcy[SS_MC],_mcs[SS_MC],_mcf[SS_MC];
+static uint32_t _mc_rng=54321;
+static uint32_t mc_rand(void){_mc_rng=_mc_rng*1664525+1013904223;return _mc_rng;}
+static void draw_ss_matrix(sfcml_Window*win){
+    if(!_mc_i){
+        for(int i=0;i<SS_MC;i++){
+            _mcy[i]=(uint8_t)(mc_rand()%60);
+            _mcs[i]=(uint8_t)(1+mc_rand()%4);
+            _mcf[i]=0;
+        }
+        _mc_i=1;
+        sfcml_fillRect(win,sfcml_rect(0,0,640,480),SFCML_BLACK);
+    }
+    /* Fondu progressif de tous les pixels vers le noir */
+    uint8_t*b=win->back;
+    uint32_t tot=(uint32_t)win->pitch*win->height;
+    for(uint32_t p=0;p<tot;p++){if(b[p]>10)b[p]-=10;else b[p]=0;}
+    /* Nouveaux caracteres */
+    for(int c=0;c<SS_MC;c++){
+        _mcf[c]++;if(_mcf[c]<_mcs[c])continue;_mcf[c]=0;
+        int x=c*8,y=(int)_mcy[c]*8;
+        if(y<480){
+            char ch=(char)(33+mc_rand()%94);
+            sfcml_Color fg=(_mcy[c]%20<2)?sfcml_rgb(200,255,200):sfcml_rgb(0,180,0);
+            sfcml_drawChar(win,ch,x,y,fg,SFCML_BLACK);
+        }
+        _mcy[c]++;if(_mcy[c]>=60)_mcy[c]=0;
+    }
+    sfcml_present(win);
+}
+
+/* ============================================================
+ * Dispatcher economiseurs d'ecran
+ * ============================================================ */
+static void draw_screensaver(sfcml_Window*win){
+    switch(_ss_id){
+    case 0: draw_ss_clock(win);     break;
+    case 1: draw_ss_tree(win);      break;
+    case 2: draw_ss_mandelbrot(win);break;
+    case 3: draw_ss_stars(win);     break;
+    default:draw_ss_matrix(win);    break;
+    }
+}
+
+/* ============================================================
+ * NAVIGATEUR WEB
+ * ============================================================ */
+static void calc_press(char btn){
+    if(_calc_err&&btn!='C'){return;}
+    if(btn=='C'){_calc_disp[0]='0';_calc_disp[1]='\0';_calc_acc=0.0;_calc_cur=0.0;_calc_op=0;_calc_new=1;_calc_err=0;return;}
+    if(btn>='0'&&btn<='9'){
+        if(_calc_new){_calc_disp[0]=btn;_calc_disp[1]='\0';_calc_new=0;}
+        else{int l=(int)strlen(_calc_disp);if(l<18){_calc_disp[l]=btn;_calc_disp[l+1]='\0';}}
+        return;
+    }
+    if(btn=='.'){
+        if(_calc_new){_calc_disp[0]='0';_calc_disp[1]='.';_calc_disp[2]='\0';_calc_new=0;return;}
+        if(!strchr(_calc_disp,'.')){int l=(int)strlen(_calc_disp);_calc_disp[l]='.';_calc_disp[l+1]='\0';}
+        return;
+    }
+    double v=0.0;int neg=0,i=0,dec=0;int dl=0;
+    if(_calc_disp[0]=='-'){neg=1;i=1;}
+    for(;_calc_disp[i];i++){
+        char c=_calc_disp[i];
+        if(c=='.'){dec=1;dl=0;}
+        else if(c>='0'&&c<='9'){
+            if(!dec)v=v*10+(c-'0');
+            else{dl++;double f=1.0;for(int j=0;j<dl;j++)f*=0.1;v+=((c-'0')*f);}
+        }
+    }
+    if(neg)v=-v;
+    _calc_cur=v;
+    if(btn=='='){
+        if(_calc_op=='+')v=_calc_acc+_calc_cur;
+        else if(_calc_op=='-')v=_calc_acc-_calc_cur;
+        else if(_calc_op=='*')v=_calc_acc*_calc_cur;
+        else if(_calc_op=='/'){if(_calc_cur==0.0){_calc_err=1;strcpy(_calc_disp,"Erreur");return;}v=_calc_acc/_calc_cur;}
+        else v=_calc_cur;
+        int iv=(int)v;
+        if(v-(double)iv==0.0){
+            char tmp[24];int ti=0,neg2=(iv<0);if(neg2){iv=-iv;tmp[ti++]='-';}
+            if(iv==0)tmp[ti++]='0';
+            else{char r[20];int ri=0;int vv=iv;while(vv){r[ri++]='0'+vv%10;vv/=10;}while(ri--)tmp[ti++]=r[ri];}
+            tmp[ti]='\0';strcpy(_calc_disp,tmp);
+        }else{
+            int neg3=(v<0.0);if(neg3)v=-v;
+            int iv2=(int)v;double frac=v-(double)iv2;
+            char tmp[24];int ti=0;
+            if(neg3)tmp[ti++]='-';
+            if(iv2==0)tmp[ti++]='0';
+            else{char r[20];int ri=0;int vv=iv2;while(vv){r[ri++]='0'+vv%10;vv/=10;}while(ri--)tmp[ti++]=r[ri];}
+            tmp[ti++]='.';
+            for(int k=0;k<6;k++){frac*=10.0;int d=(int)frac;tmp[ti++]='0'+d;frac-=(double)d;}
+            tmp[ti]='\0';ti--;while(ti>0&&tmp[ti]=='0')tmp[ti--]='\0';
+            if(tmp[ti]=='.')tmp[ti]='\0';
+            strcpy(_calc_disp,tmp);
+        }
+        _calc_acc=v;_calc_op=0;_calc_new=1;
+        return;
+    }
+    if(btn=='%'){_calc_cur=v/100.0;double frac2=_calc_cur-(int)_calc_cur;if(frac2==0.0){char t[24];int ti=0,iv3=(int)_calc_cur,neg4=(iv3<0);if(neg4)iv3=-iv3;if(neg4)t[ti++]='-';char r[20];int ri=0;if(iv3==0)t[ti++]='0';else{int vv=iv3;while(vv){r[ri++]='0'+vv%10;vv/=10;}while(ri--)t[ti++]=r[ri];}t[ti]='\0';strcpy(_calc_disp,t);}else{char t[24];int ti=0;double cv=_calc_cur;int neg5=(cv<0.0);if(neg5)cv=-cv;int iv4=(int)cv;if(neg5)t[ti++]='-';char r[20];int ri=0;if(iv4==0)t[ti++]='0';else{int vv=iv4;while(vv){r[ri++]='0'+vv%10;vv/=10;}while(ri--)t[ti++]=r[ri];}t[ti++]='.';double fc=cv-(double)iv4;for(int k=0;k<4;k++){fc*=10.0;int d=(int)fc;t[ti++]='0'+d;fc-=(double)d;}t[ti]='\0';ti--;while(ti>0&&t[ti]=='0')t[ti--]='\0';if(t[ti]=='.')t[ti]='\0';strcpy(_calc_disp,t);}
+        _calc_op=0;_calc_new=1;return;}
+    _calc_acc=v;_calc_op=btn;_calc_new=1;
+}
+
+static void draw_calc(sfcml_Window*win,int wi){
+    AppWin*w=&_wins[wi];
+    int sx=w->x+1,sy=w->y+TBAR_H,sw=w->w-2,sh=w->h-TBAR_H-1;(void)sh;
+    sfcml_Color bg=sfcml_rgb(32,32,38);
+    sfcml_Color dbg=sfcml_rgb(22,22,28);
+    sfcml_Color nbg=sfcml_rgb(50,52,60);
+    sfcml_Color obg=sfcml_rgb(14,50,110);
+    sfcml_Color ebg=sfcml_rgb(180,10,10);
+    sfcml_Color eqbg=sfcml_rgb(0,140,60);
+    sfcml_fillRect(win,sfcml_rect(sx,sy,sw,sh),bg);
+    sfcml_fillRect(win,sfcml_rect(sx+6,sy+6,sw-12,36),dbg);
+    sfcml_drawRect(win,sfcml_rect(sx+6,sy+6,sw-12,36),sfcml_rgb(60,60,80));
+    int dl=(int)strlen(_calc_disp);
+    int dx=sx+sw-12-dl*8;if(dx<sx+10)dx=sx+10;
+    sfcml_drawText(win,_calc_disp,dx,sy+18,_calc_err?sfcml_rgb(255,80,80):SFCML_WHITE,dbg);
+    int bw=(sw-14)/4,bh=38;
+    int bsy=sy+48;
+    static const char* blbl[5][4]={{"C","%","/","*"},{"7","8","9","-"},{"4","5","6","+"},{"1","2","3","="},{"0 ","."," ","="}};
+    (void)blbl;
+    for(int r=0;r<5;r++){
+        for(int c=0;c<4;c++){
+            if(r==4&&c==0){
+                int bx=sx+7;int by=bsy+r*bh+r*2;
+                sfcml_Color bc;
+                bc=sfcml_rgb(55,57,65);
+                sfcml_fillRect(win,sfcml_rect(bx,by,bw*2+2,bh-2),bc);
+                sfcml_drawRect(win,sfcml_rect(bx,by,bw*2+2,bh-2),sfcml_rgb(70,70,90));
+                sfcml_drawText(win,"0",bx+(bw*2+2)/2-4,by+bh/2-4,SFCML_WHITE,bc);
+                int bx2=sx+7+bw*2+4;
+                sfcml_fillRect(win,sfcml_rect(bx2,by,bw-2,bh-2),sfcml_rgb(55,57,65));
+                sfcml_drawRect(win,sfcml_rect(bx2,by,bw-2,bh-2),sfcml_rgb(70,70,90));
+                sfcml_drawText(win,".",bx2+bw/2-4,by+bh/2-4,SFCML_WHITE,sfcml_rgb(55,57,65));
+                continue;
+            }
+            if(r==4&&c==1)continue;
+            char key=' ';
+            const char* lbl="";
+            if(r==0){const char k[]={'C','%','/','*'};key=k[c];const char* lb[]={"C","%","/","*"};lbl=lb[c];}
+            else if(r==1){const char k[]={'7','8','9','-'};key=k[c];const char* lb[]={"7","8","9","-"};lbl=lb[c];}
+            else if(r==2){const char k[]={'4','5','6','+'};key=k[c];const char* lb[]={"4","5","6","+"};lbl=lb[c];}
+            else if(r==3){const char k[]={'1','2','3','='};key=k[c];const char* lb[]={"1","2","3","="};lbl=lb[c];}
+            else if(r==4&&c==2){key='.';lbl=".";}
+            else if(r==4&&c==3){key='=';lbl="=";}
+            (void)key;
+            int bx=sx+7+c*(bw+2);int by=bsy+r*(bh+2);
+            sfcml_Color bc;
+            if(r==0)bc=(c==0)?ebg:obg;
+            else if(c==3)bc=(r==3||r==4)?eqbg:obg;
+            else bc=nbg;
+            sfcml_fillRect(win,sfcml_rect(bx,by,bw-2,bh-2),bc);
+            sfcml_drawRect(win,sfcml_rect(bx,by,bw-2,bh-2),sfcml_rgb(70,70,90));
+            sfcml_drawText(win,lbl,bx+bw/2-4,by+bh/2-4,SFCML_WHITE,bc);
+        }
+    }
+}
+
+static void calc_click(int mx,int my){
+    AppWin*w=&_wins[W_CALC];
+    int sx=w->x+1,sy=w->y+TBAR_H,sw=w->w-2;
+    int bw=(sw-14)/4,bh=38,bsy=sy+48;
+    for(int r=0;r<5;r++){
+        for(int c=0;c<4;c++){
+            int bx,by,bww,bhh=bh-2;
+            by=bsy+r*(bh+2);bhh=bh-2;
+            if(r==4&&c==0){bx=sx+7;bww=bw*2+2;}
+            else if(r==4&&c==1)continue;
+            else if(r==4&&c==2){bx=sx+7+bw*2+4;bww=bw-2;}
+            else{bx=sx+7+c*(bw+2);bww=bw-2;}
+            if(mx>=bx&&mx<bx+bww&&my>=by&&my<by+bhh){
+                char key=' ';
+                if(r==0){const char k[]={'C','%','/','*'};key=k[c];}
+                else if(r==1){const char k[]={'7','8','9','-'};key=k[c];}
+                else if(r==2){const char k[]={'4','5','6','+'};key=k[c];}
+                else if(r==3){const char k[]={'1','2','3','='};key=k[c];}
+                else if(r==4&&c==0)key='0';
+                else if(r==4&&c==2)key='.';
+                else if(r==4&&c==3)key='=';
+                calc_press(key);
+                return;
+            }
+        }
+    }
+}
+
+static void fi_edit_open(void){
+    const char*fn=_fi_files[_fi_dir][_fi_sel];
+    _fi_enl=0;_fi_ecl=0;_fi_ecc=0;_fi_esc=0;
+    for(int i=0;i<FI_ER;i++)_fi_ebuf[i][0]='\0';
+    if(strstr(fn,".c")||strstr(fn,".h")||strstr(fn,".ld")){
+        strncpy(_fi_ebuf[_fi_enl],"/* ",FI_EC);strncat(_fi_ebuf[_fi_enl],fn,FI_EC-4);strncat(_fi_ebuf[_fi_enl++]," */",FI_EC);
+        strncpy(_fi_ebuf[_fi_enl++],"#include <stdio.h>",FI_EC);
+        strncpy(_fi_ebuf[_fi_enl++],"",FI_EC);
+        strncpy(_fi_ebuf[_fi_enl++],"int main(void) {",FI_EC);
+        strncpy(_fi_ebuf[_fi_enl++],"    return 0;",FI_EC);
+        strncpy(_fi_ebuf[_fi_enl++],"}",FI_EC);
+    } else if(strstr(fn,".asm")){
+        strncpy(_fi_ebuf[_fi_enl++],"; MyOS Assembleur",FI_EC);
+        strncpy(_fi_ebuf[_fi_enl++],"section .text",FI_EC);
+        strncpy(_fi_ebuf[_fi_enl++],"global _start",FI_EC);
+        strncpy(_fi_ebuf[_fi_enl++],"_start:",FI_EC);
+        strncpy(_fi_ebuf[_fi_enl++],"    mov eax, 0",FI_EC);
+        strncpy(_fi_ebuf[_fi_enl++],"    ret",FI_EC);
+    } else {
+        strncpy(_fi_ebuf[_fi_enl++],fn,FI_EC);
+        strncpy(_fi_ebuf[_fi_enl++],"",FI_EC);
+        strncpy(_fi_ebuf[_fi_enl++],"[Editez ce fichier ici]",FI_EC);
+        strncpy(_fi_ebuf[_fi_enl++],"Utilisez les fleches pour naviguer.",FI_EC);
+    }
+    _fi_edit=1;
+}
+static void fi_key(sfcml_KeyCode k){
+    char*cur=_fi_ebuf[_fi_ecl];int len=(int)strlen(cur);
+    switch(k){
+    case SFCML_KEY_ESCAPE:_fi_edit=0;break;
+    case SFCML_KEY_UP:
+        if(_fi_ecl>0){_fi_ecl--;if(_fi_ecl<_fi_esc)_fi_esc=_fi_ecl;}
+        {int ml=(int)strlen(_fi_ebuf[_fi_ecl]);if(_fi_ecc>ml)_fi_ecc=ml;}break;
+    case SFCML_KEY_DOWN:
+        if(_fi_ecl<_fi_enl-1){_fi_ecl++;if(_fi_ecl>=_fi_esc+18)_fi_esc++;}
+        {int ml=(int)strlen(_fi_ebuf[_fi_ecl]);if(_fi_ecc>ml)_fi_ecc=ml;}break;
+    case SFCML_KEY_LEFT:
+        if(_fi_ecc>0)_fi_ecc--;
+        else if(_fi_ecl>0){_fi_ecl--;_fi_ecc=(int)strlen(_fi_ebuf[_fi_ecl]);}break;
+    case SFCML_KEY_RIGHT:
+        if(_fi_ecc<len)_fi_ecc++;
+        else if(_fi_ecl<_fi_enl-1){_fi_ecl++;_fi_ecc=0;}break;
+    case SFCML_KEY_RETURN:
+        if(_fi_enl<FI_ER){
+            for(int i=_fi_enl;i>_fi_ecl+1;i--)memcpy(_fi_ebuf[i],_fi_ebuf[i-1],FI_EC+1);
+            memcpy(_fi_ebuf[_fi_ecl+1],cur+_fi_ecc,(size_t)(len-_fi_ecc+1));
+            cur[_fi_ecc]='\0';_fi_ecl++;_fi_ecc=0;_fi_enl++;
+            if(_fi_ecl>=_fi_esc+18)_fi_esc++;
+        }break;
+    case SFCML_KEY_BACKSPACE:
+        if(_fi_ecc>0){memmove(cur+_fi_ecc-1,cur+_fi_ecc,(size_t)(len-_fi_ecc+1));_fi_ecc--;}
+        else if(_fi_ecl>0){
+            int pl=(int)strlen(_fi_ebuf[_fi_ecl-1]);
+            if(pl+len<=FI_EC)strncat(_fi_ebuf[_fi_ecl-1],cur,(size_t)(FI_EC-pl));
+            for(int i=_fi_ecl;i<_fi_enl-1;i++)memcpy(_fi_ebuf[i],_fi_ebuf[i+1],FI_EC+1);
+            _fi_enl--;_fi_ecl--;_fi_ecc=pl;
+            if(_fi_ecl<_fi_esc)_fi_esc=_fi_ecl;
+        }break;
+    default:break;
+    }
+}
+static void fi_text(char ch){
+    if(ch<32)return;
+    char*cur=_fi_ebuf[_fi_ecl];int len=(int)strlen(cur);
+    if(len>=FI_EC)return;
+    memmove(cur+_fi_ecc+1,cur+_fi_ecc,(size_t)(len-_fi_ecc+1));
+    cur[_fi_ecc++]=ch;
+}
+
+static void draw_files(sfcml_Window*win,int wi){
+    AppWin*w=&_wins[wi];
+    int sx=w->x+1,sy=w->y+TBAR_H,sw=w->w-2,sh=w->h-TBAR_H-1;
+    sfcml_Color bg=sfcml_rgb(245,246,247);
+    sfcml_Color selbg=sfcml_rgb(204,228,255);
+    sfcml_Color hdr=sfcml_rgb(230,232,236);
+    sfcml_fillRect(win,sfcml_rect(sx,sy,sw,sh),bg);
+    sfcml_fillRect(win,sfcml_rect(sx,sy,sw,28),hdr);
+    sfcml_drawHLine(win,sx,sy+27,sw,sfcml_rgb(200,202,206));
+    sfcml_drawText(win,"<",sx+6,sy+10,sfcml_rgb(60,60,80),hdr);
+    sfcml_drawText(win,">",sx+20,sy+10,sfcml_rgb(60,60,80),hdr);
+    if(_fi_edit){
+        sfcml_drawText(win,"[Edition]",sx+38,sy+10,sfcml_rgb(0,120,220),hdr);
+        sfcml_drawText(win,_fi_files[_fi_dir][_fi_sel],sx+116,sy+10,sfcml_rgb(40,40,60),hdr);
+        sfcml_fillRect(win,sfcml_rect(sx+sw-62,sy+5,56,18),sfcml_rgb(180,10,10));
+        sfcml_drawText(win,"Fermer",sx+sw-60,sy+9,SFCML_WHITE,sfcml_rgb(180,10,10));
+    } else {
+        sfcml_drawText(win,_fi_dirs[_fi_dir],sx+38,sy+10,sfcml_rgb(60,60,80),hdr);
+    }
+    int lpw=140;
+    sfcml_fillRect(win,sfcml_rect(sx,sy+28,lpw,sh-28),sfcml_rgb(240,241,243));
+    sfcml_drawVLine(win,sx+lpw,sy+28,sh-28,sfcml_rgb(200,202,206));
+    for(int i=0;i<8;i++){
+        int iy=sy+32+i*22;
+        int sel=(_fi_dir==i);
+        sfcml_Color lb=sel?selbg:sfcml_rgb(240,241,243);
+        sfcml_fillRect(win,sfcml_rect(sx+1,iy,lpw-1,20),lb);
+        sfcml_fillRect(win,sfcml_rect(sx+4,iy+4,12,10),sfcml_rgb(255,196,0));
+        sfcml_fillRect(win,sfcml_rect(sx+4,iy+3,5,3),sfcml_rgb(255,196,0));
+        sfcml_drawText(win,i<4?(_fi_dirs[i]+3):(_fi_dirs[i]+14),sx+20,iy+6,sfcml_rgb(30,30,40),lb);
+    }
+    int rpx=sx+lpw+2,rpw=sw-lpw-2;
+    if(_fi_edit){
+        sfcml_Color edibg=sfcml_rgb(18,20,30);
+        sfcml_Color lnbg=sfcml_rgb(14,16,24);
+        int lnw=26;
+        int eah=sh-46;
+        sfcml_fillRect(win,sfcml_rect(rpx,sy+28,rpw,eah),edibg);
+        sfcml_fillRect(win,sfcml_rect(rpx,sy+28,lnw,eah),lnbg);
+        sfcml_drawVLine(win,rpx+lnw,sy+28,eah,sfcml_rgb(40,40,60));
+        int visible=eah/8;if(visible>FI_ER)visible=FI_ER;
+        for(int i=0;i<visible;i++){
+            int line=_fi_esc+i;if(line>=_fi_enl)break;
+            int ly=sy+29+i*8;
+            char ln[3];ln[0]='0'+(line+1)/10;ln[1]='0'+(line+1)%10;ln[2]='\0';
+            sfcml_Color lnc=(line==_fi_ecl)?sfcml_rgb(200,200,80):sfcml_rgb(70,80,100);
+            sfcml_drawText(win,ln,rpx+1,ly,lnc,lnbg);
+            sfcml_Color lb2=(line==_fi_ecl)?sfcml_rgb(22,26,44):edibg;
+            if(line==_fi_ecl)sfcml_fillRect(win,sfcml_rect(rpx+lnw,ly-1,rpw-lnw,9),lb2);
+            sfcml_drawText(win,_fi_ebuf[line],rpx+lnw+2,ly,SFCML_WHITE,lb2);
+            if(line==_fi_ecl&&_blink)
+                sfcml_fillRect(win,sfcml_rect(rpx+lnw+2+_fi_ecc*8,ly,2,8),sfcml_rgb(210,210,210));
+        }
+    } else {
+        sfcml_fillRect(win,sfcml_rect(rpx,sy+28,rpw,sh-28),bg);
+        sfcml_fillRect(win,sfcml_rect(rpx,sy+28,rpw,18),sfcml_rgb(236,238,240));
+        sfcml_drawHLine(win,rpx,sy+45,rpw,sfcml_rgb(200,202,206));
+        sfcml_drawText(win,"Nom",rpx+8,sy+33,sfcml_rgb(70,70,90),sfcml_rgb(236,238,240));
+        sfcml_drawText(win,"Type",rpx+200,sy+33,sfcml_rgb(70,70,90),sfcml_rgb(236,238,240));
+        for(int i=0;i<6;i++){
+            const char*fn=_fi_files[_fi_dir][i];
+            if(!fn||!fn[0])continue;
+            int fy=sy+50+i*24;
+            int sel=(_fi_sel==i);
+            sfcml_Color fb=sel?selbg:bg;
+            sfcml_fillRect(win,sfcml_rect(rpx,fy,rpw,22),fb);
+            int is_dir=(fn[0]>='A'&&fn[0]<='Z'&&fn[1]>='a'&&!strchr(fn,'.'));
+            if(is_dir){sfcml_fillRect(win,sfcml_rect(rpx+4,fy+4,14,11),sfcml_rgb(255,196,0));sfcml_fillRect(win,sfcml_rect(rpx+4,fy+3,6,3),sfcml_rgb(255,196,0));}
+            else{sfcml_fillRect(win,sfcml_rect(rpx+4,fy+3,12,14),sfcml_rgb(220,232,255));sfcml_drawRect(win,sfcml_rect(rpx+4,fy+3,12,14),sfcml_rgb(100,140,200));}
+            sfcml_drawText(win,fn,rpx+22,fy+7,sfcml_rgb(20,20,30),fb);
+            const char*tp=is_dir?"Dossier":"Fichier";
+            sfcml_drawText(win,tp,rpx+200,fy+7,sfcml_rgb(100,100,120),fb);
+            sfcml_drawHLine(win,rpx,fy+22,rpw,sfcml_rgb(220,222,226));
+        }
+    }
+    sfcml_fillRect(win,sfcml_rect(sx,sy+sh-18,sw,18),hdr);
+    sfcml_drawHLine(win,sx,sy+sh-19,sw,sfcml_rgb(200,202,206));
+    if(_fi_edit)sfcml_drawText(win,"ESC:Fermer  Fleches:Naviguer  Entree:Ligne",sx+8,sy+sh-12,sfcml_rgb(60,80,100),hdr);
+    else sfcml_drawText(win,"Clic x2 sur un fichier pour editer",sx+8,sy+sh-12,sfcml_rgb(80,80,100),hdr);
+}
+
+static void files_click(int mx,int my){
+    AppWin*w=&_wins[W_FILES];
+    int sx=w->x+1,sy=w->y+TBAR_H,sw=w->w-2;
+    if(_fi_edit){
+        if(mx>=sx+sw-62&&mx<sx+sw-6&&my>=sy+5&&my<sy+23)_fi_edit=0;
+        return;
+    }
+    int lpw=140;
+    if(mx>=sx&&mx<sx+lpw){
+        for(int i=0;i<8;i++){
+            int iy=sy+32+i*22;
+            if(my>=iy&&my<iy+20){_fi_dir=i;_fi_sel=0;return;}
+        }
+        return;
+    }
+    int rpx=sx+lpw+2;
+    for(int i=0;i<6;i++){
+        int fy=sy+50+i*24;
+        if(mx>=rpx&&my>=fy&&my<fy+22){
+            const char*fn=_fi_files[_fi_dir][i];
+            if(!fn||!fn[0])return;
+            int is_dir=(fn[0]>='A'&&fn[0]<='Z'&&fn[1]>='a'&&!strchr(fn,'.'));
+            if(_fi_sel==i&&!is_dir){fi_edit_open();return;}
+            _fi_sel=i;return;
+        }
+    }
+    if(mx>=sx+6&&mx<sx+18&&my>=sy&&my<sy+28){if(_fi_dir>0){_fi_dir--;_fi_sel=0;}}
+    if(mx>=sx+20&&mx<sx+32&&my>=sy&&my<sy+28){if(_fi_dir<7){_fi_dir++;_fi_sel=0;}}
+}
+
+static void draw_browser(sfcml_Window*win,int wi){
+    AppWin*w=&_wins[wi];
+    int sx=w->x+1,sy=w->y+TBAR_H,sw=w->w-2,sh=w->h-TBAR_H-1;
+    sfcml_Color dbg=sfcml_rgb(32,33,36);
+    sfcml_Color urlbg=_burl_foc?sfcml_rgb(60,61,68):sfcml_rgb(48,49,52);
+    (void)sh;
+
+    /* Tab bar */
+    sfcml_fillRect(win,sfcml_rect(sx,sy,sw,22),sfcml_rgb(40,41,44));
+    const char*tl[7]={"Nouvel onglet","Epitech","Google","MyOS","GitHub","Resultats","Web"};
+    sfcml_fillRect(win,sfcml_rect(sx+2,sy+2,130,18),dbg);
+    sfcml_drawText(win,(_bpage<7)?tl[_bpage]:tl[0],sx+6,sy+7,sfcml_rgb(210,210,210),dbg);
+
+    /* Nav bar */
+    int ny=sy+22;
+    sfcml_fillRect(win,sfcml_rect(sx,ny,sw,26),dbg);
+    sfcml_drawHLine(win,sx,ny+25,sw,sfcml_rgb(55,55,65));
+    sfcml_drawText(win,"<",sx+4, ny+9,_bpage?sfcml_rgb(190,190,190):sfcml_rgb(55,55,55),dbg);
+    sfcml_drawText(win,">",sx+18,ny+9,(_bpage<4)?sfcml_rgb(190,190,190):sfcml_rgb(55,55,55),dbg);
+    sfcml_drawText(win,"R",sx+34,ny+9,sfcml_rgb(170,170,170),dbg);
+    int ux=sx+50,uw=sw-56;
+    sfcml_fillRect(win,sfcml_rect(ux,ny+3,uw,20),urlbg);
+    sfcml_drawRect(win,sfcml_rect(ux,ny+3,uw,20),_burl_foc?sfcml_rgb(80,130,255):sfcml_rgb(55,56,60));
+    sfcml_drawText(win,_burl,ux+4,ny+7,sfcml_rgb(210,210,210),urlbg);
+    if(_burl_foc&&_blink)
+        sfcml_fillRect(win,sfcml_rect(ux+4+_burl_len*8,ny+5,2,12),SFCML_WHITE);
+
+    /* Page content */
+    int cay=ny+26;
+    int cah=sh-22-26;
+    switch(_bpage){
+    case 0:{
+        sfcml_fillRect(win,sfcml_rect(sx,cay,sw,cah),dbg);
+        int cx2=sx+sw/2;
+        draw_big_text(win,"My",cx2-72,cay+18,2,sfcml_rgb(66,133,244),dbg);
+        draw_big_text(win,"B", cx2-36,cay+18,2,sfcml_rgb(234,67,53), dbg);
+        draw_big_text(win,"rowser",cx2-20,cay+18,2,sfcml_rgb(52,168,83),dbg);
+        sfcml_fillRect(win,sfcml_rect(cx2-110,cay+50,220,22),sfcml_rgb(48,49,52));
+        sfcml_drawRect(win,sfcml_rect(cx2-110,cay+50,220,22),sfcml_rgb(70,70,90));
+        sfcml_drawText(win,"Saisir une URL...",cx2-102,cay+55,sfcml_rgb(90,90,110),sfcml_rgb(48,49,52));
+        const char*tn[4]={"Epitech","Google","GitHub","MyOS"};
+        sfcml_Color tc[4]={{180,10,10,255},{66,133,244,255},{36,41,47,255},{0,110,210,255}};
+        for(int i=0;i<4;i++){
+            int tx2=cx2-170+i*88,ty2=cay+88;
+            sfcml_fillRect(win,sfcml_rect(tx2,ty2,76,48),tc[i]);
+            sfcml_drawText(win,tn[i],tx2+6,ty2+18,SFCML_WHITE,tc[i]);
+        }
+        break;}
+    case 1:{
+        sfcml_Color rd=sfcml_rgb(200,10,10);
+        sfcml_fillRect(win,sfcml_rect(sx,cay,sw,40),rd);
+        draw_big_text(win,"EPITECH",sx+8,cay+6,2,SFCML_WHITE,rd);
+        sfcml_drawText(win,"epitech.eu",sx+sw-76,cay+16,sfcml_rgb(255,180,180),rd);
+        sfcml_fillRect(win,sfcml_rect(sx,cay+40,sw,cah-40),sfcml_rgb(14,14,22));
+        const char*ln[6]={
+            "Ecole d'expert en informatique, fondee en 1999",
+            "Campus: Paris, Lyon, Barcelone, Toulouse, Rennes...",
+            "Cursus: 5 ans (Bachelor 3 + Master 2)",
+            "Methode: Projets, peer-learning, piscines intensives",
+            "Reseau: 50 000+ diplomes dans 30 pays",
+            "   epitech.eu  |  admissions@epitech.eu"};
+        for(int i=0;i<6;i++)
+            sfcml_drawText(win,ln[i],sx+8,cay+48+i*16,
+                i==5?sfcml_rgb(100,160,255):sfcml_rgb(180,180,200),sfcml_rgb(14,14,22));
+        break;}
+    case 2:{ /* Google interactif */
+        sfcml_Color wh=sfcml_rgb(255,255,255);
+        sfcml_Color fbg=sfcml_rgb(248,249,250);
+        sfcml_fillRect(win,sfcml_rect(sx,cay,sw,cah),wh);
+        int gx=sx+sw/2-54,gy=cay+28;
+        sfcml_Color gc[6]={{66,133,244,255},{234,67,53,255},{251,188,5,255},
+                           {66,133,244,255},{52,168,83,255},{234,67,53,255}};
+        const char gl[]="Google";
+        for(int i=0;gl[i];i++)
+            draw_big_char(win,gl[i],gx+i*18,gy,2,gc[i],wh);
+        /* Barre de recherche interactive */
+        int qx=sx+sw/2-170,qy=gy+40,qw=340;
+        sfcml_fillRect(win,sfcml_rect(qx,qy,qw,36),wh);
+        sfcml_drawRect(win,sfcml_rect(qx,qy,qw,36),_bsearch_foc?sfcml_rgb(66,133,244):sfcml_rgb(218,220,224));
+        if(_bsearch_len>0)
+            sfcml_drawText(win,_bsearch,qx+12,qy+14,sfcml_rgb(20,20,20),wh);
+        else if(!_bsearch_foc)
+            sfcml_drawText(win,"Rechercher sur Google",qx+12,qy+14,sfcml_rgb(150,150,160),wh);
+        if(_bsearch_foc&&_blink)
+            sfcml_fillRect(win,sfcml_rect(qx+12+_bsearch_len*8,qy+6,2,20),sfcml_rgb(66,133,244));
+        /* Bouton recherche */
+        int bx=sx+sw/2-52,by=qy+44;
+        sfcml_fillRect(win,sfcml_rect(bx,by,104,28),fbg);
+        sfcml_drawRect(win,sfcml_rect(bx,by,104,28),sfcml_rgb(218,220,224));
+        sfcml_drawText(win,"Recherche Google",bx+4,by+10,sfcml_rgb(60,60,80),fbg);
+        break;}
+    case 3:{
+        sfcml_Color bg3=sfcml_rgb(16,16,26);
+        sfcml_fillRect(win,sfcml_rect(sx,cay,sw,cah),bg3);
+        draw_big_text(win,"MyOS",sx+8,cay+14,2,sfcml_rgb(0,140,255),bg3);
+        sfcml_drawText(win,"v0.1 Epitech",sx+80,cay+24,sfcml_rgb(90,90,130),bg3);
+        sfcml_drawHLine(win,sx+6,cay+46,sw-12,sfcml_rgb(45,45,65));
+        const char*ki[6]={"Version","CPU","RAM","Affichage","Bootloader","Build"};
+        const char*kv[6]={"0.1 Epitech","x86 32-bit PM","128 MB","VESA 640x480","MineGRUB v1.0","GCC+NASM+LD"};
+        for(int i=0;i<6;i++){
+            int iy=cay+52+i*20;
+            sfcml_Color rb=(i%2)?sfcml_rgb(14,14,24):sfcml_rgb(20,20,32);
+            sfcml_fillRect(win,sfcml_rect(sx+4,iy,sw-8,18),rb);
+            sfcml_drawText(win,ki[i],sx+8, iy+5,sfcml_rgb(100,100,150),rb);
+            sfcml_drawText(win,kv[i],sx+84,iy+5,sfcml_rgb(200,200,230),rb);
+        }
+        break;}
+    case 4:{ /* GitHub */
+        sfcml_Color gb=sfcml_rgb(13,17,23);
+        sfcml_Color gbar=sfcml_rgb(22,27,34);
+        sfcml_fillRect(win,sfcml_rect(sx,cay,sw,cah),gb);
+        sfcml_fillRect(win,sfcml_rect(sx,cay,sw,36),gbar);
+        sfcml_drawText(win,"GitHub",sx+10,cay+12,SFCML_WHITE,gbar);
+        const char*rn[4]={"myos/kernel","myos/sfcml","myos/libc","myos/bootloader"};
+        for(int i=0;i<4;i++){
+            int ry=cay+42+i*44;
+            sfcml_fillRect(win,sfcml_rect(sx+4,ry,sw-8,40),gbar);
+            sfcml_drawRect(win,sfcml_rect(sx+4,ry,sw-8,40),sfcml_rgb(48,54,61));
+            sfcml_drawText(win,rn[i],sx+12,ry+6, sfcml_rgb(66,133,244),gbar);
+            sfcml_drawText(win,"C | Public",sx+12,ry+22,sfcml_rgb(130,140,150),gbar);
+        }
+        break;}
+    case 5:{ /* Resultats de recherche Google */
+        sfcml_Color wh=sfcml_rgb(255,255,255);
+        sfcml_Color fbg=sfcml_rgb(248,249,250);
+        sfcml_Color gr=sfcml_rgb(112,112,112);
+        sfcml_fillRect(win,sfcml_rect(sx,cay,sw,cah),wh);
+        sfcml_fillRect(win,sfcml_rect(sx,cay,sw,54),fbg);
+        sfcml_drawHLine(win,sx,cay+53,sw,sfcml_rgb(218,220,224));
+        sfcml_Color gc2[6]={{66,133,244,255},{234,67,53,255},{251,188,5,255},
+                            {66,133,244,255},{52,168,83,255},{234,67,53,255}};
+        const char gl2[]="Google";
+        for(int i2=0;gl2[i2];i2++)
+            draw_big_char(win,gl2[i2],sx+6+i2*9,cay+8,1,gc2[i2],fbg);
+        int mqx=sx+68,mqw=sw-150;
+        sfcml_fillRect(win,sfcml_rect(mqx,cay+8,mqw,30),wh);
+        sfcml_drawRect(win,sfcml_rect(mqx,cay+8,mqw,30),sfcml_rgb(218,220,224));
+        sfcml_drawText(win,_bsearch,mqx+8,cay+19,sfcml_rgb(20,20,20),wh);
+        sfcml_drawText(win,"Tout",sx+6,cay+58,sfcml_rgb(66,133,244),wh);
+        sfcml_fillRect(win,sfcml_rect(sx+6,cay+67,22,2),sfcml_rgb(66,133,244));
+        sfcml_drawText(win,"Images",sx+42,cay+58,gr,wh);
+        sfcml_drawText(win,"Maps",sx+96,cay+58,gr,wh);
+        sfcml_drawText(win,"Actualites",sx+134,cay+58,gr,wh);
+        int ry=cay+76;
+        sfcml_drawText(win,"Environ 1 540 000 000 resultats (0.42 sec)",sx+6,ry,gr,wh);
+        ry+=18;
+        const char*rt[4],*ru[4],*rd[4];
+        if(strstr(_bsearch,"pitech")){
+            rt[0]="Epitech Technology - L'ecole expert en informatique";
+            ru[0]="www.epitech.eu";
+            rd[0]="Formation 5 ans. Expert en technologies. 30 campus en Europe.";
+            rt[1]="Admissions Epitech - Postulez maintenant";
+            ru[1]="www.epitech.eu/admission";
+            rd[1]="Piscine, tests de selection, entretien. Campus France & Europe.";
+            rt[2]="Epitech Alumni - Le reseau des 50 000 diplomes";
+            ru[2]="alumni.epitech.eu";
+            rd[2]="Reseau actif de diplomes Epitech dans 30 pays.";
+            rt[3]="MyOS - Projet Epitech sur GitHub";
+            ru[3]="github.com/myos/kernel";
+            rd[3]="OS bare-metal 32-bit developpe dans le cadre d'Epitech.";
+        } else if(strstr(_bsearch,"ithub")||strstr(_bsearch,"itlab")){
+            rt[0]="GitHub - Where the world builds software";
+            ru[0]="github.com";
+            rd[0]="100M+ developpeurs. Repositories, Actions, CI/CD gratuit.";
+            rt[1]="myos/kernel - GitHub";
+            ru[1]="github.com/myos/kernel";
+            rd[1]="MyOS kernel C+NASM. Stars: 42. Forks: 7. MIT License.";
+            rt[2]="Git - Systeme de controle de version";
+            ru[2]="git-scm.com";
+            rd[2]="Systeme de controle de version distribue et libre.";
+            rt[3]="GitHub Actions - Automatisez votre workflow";
+            ru[3]="github.com/features/actions";
+            rd[3]="Automatisez votre pipeline de developpement sur GitHub.";
+        } else if(strstr(_bsearch,"inux")||strstr(_bsearch,"ernel")||strstr(_bsearch,"myos")||strstr(_bsearch,"MyOS")||strstr(_bsearch,"nasm")){
+            rt[0]="The Linux Kernel Archives";
+            ru[0]="www.kernel.org";
+            rd[0]="The Linux Kernel. Current stable: 6.7.2. Source, patches.";
+            rt[1]="OSDev Wiki - Ecrire son propre OS";
+            ru[1]="wiki.osdev.org";
+            rd[1]="Tutoriels OS x86: mode protege, GDT, IDT, paging, VESA.";
+            rt[2]="MyOS - x86 Bare-metal OS (C + NASM)";
+            ru[2]="github.com/myos/kernel";
+            rd[2]="Boot MineGRUB, VESA 640x480, libSFCML. Epitech 2024.";
+            rt[3]="NASM - Netwide Assembler";
+            ru[3]="www.nasm.us";
+            rd[3]="Assembleur x86/x64 libre. Syntaxe Intel. Freestanding.";
+        } else {
+            rt[0]="MyOS - Systeme d'exploitation x86";
+            ru[0]="github.com/myos";
+            rd[0]="OS bare-metal 32-bit. Boot MineGRUB, VESA 640x480.";
+            rt[1]="Epitech Technology - epitech.eu";
+            ru[1]="www.epitech.eu";
+            rd[1]="L'ecole ou MyOS a ete cree. Formation 5 ans en info.";
+            rt[2]="GitHub - Depot du projet MyOS";
+            ru[2]="github.com/myos/kernel";
+            rd[2]="Tout le code source de MyOS disponible en open source.";
+            rt[3]="MyBrowser - Navigateur integre MyOS";
+            ru[3]="myos://info";
+            rd[3]="Navigateur avec 5 pages simulees et recherche Google.";
+        }
+        for(int i=0;i<4;i++){
+            int iry=ry+i*60;
+            sfcml_drawText(win,rt[i],sx+6,iry,   sfcml_rgb(26,13,171),wh);
+            sfcml_drawText(win,ru[i],sx+6,iry+12, sfcml_rgb(0,102,33),wh);
+            sfcml_drawText(win,rd[i],sx+6,iry+24, sfcml_rgb(60,60,60),wh);
+            sfcml_drawHLine(win,sx+4,iry+37,sw-8,sfcml_rgb(224,224,224));
+        }
+        break;}
+    case 6:{ /* Reponse HTTP reelle */
+        sfcml_Color bg6=sfcml_rgb(16,18,26);
+        sfcml_fillRect(win,sfcml_rect(sx,cay,sw,cah),bg6);
+        sfcml_fillRect(win,sfcml_rect(sx,cay,sw,26),sfcml_rgb(22,24,36));
+        sfcml_drawHLine(win,sx,cay+25,sw,sfcml_rgb(50,50,70));
+        sfcml_drawText(win,"HTTP Response",sx+6,cay+9,sfcml_rgb(0,200,100),sfcml_rgb(22,24,36));
+        sfcml_drawText(win,_burl,sx+100,cay+9,sfcml_rgb(100,150,255),sfcml_rgb(22,24,36));
+        if(_net_len<=0){
+            sfcml_drawText(win,"Aucune reponse ou erreur.",sx+8,cay+40,sfcml_rgb(200,80,80),bg6);
+        } else {
+            int ry=cay+32;int rpos=0;int lnum=0;
+            char lbuf[76];
+            while(rpos<_net_len&&ry<cay+cah-8&&lnum<40){
+                int ll=0;
+                while(rpos<_net_len&&_net_buf[rpos]!='\n'&&_net_buf[rpos]!='\r'&&ll<75)
+                    lbuf[ll++]=_net_buf[rpos++];
+                lbuf[ll]='\0';
+                while(rpos<_net_len&&(_net_buf[rpos]=='\n'||_net_buf[rpos]=='\r'))rpos++;
+                if(ll>0){
+                    sfcml_Color lc;
+                    if(lnum==0)lc=sfcml_rgb(100,255,100);
+                    else if(lbuf[0]=='<')lc=sfcml_rgb(150,200,255);
+                    else if(ll>4&&lbuf[0]>='A'&&lbuf[0]<='Z'&&lbuf[1]>='a')lc=sfcml_rgb(220,180,100);
+                    else lc=sfcml_rgb(180,180,200);
+                    sfcml_drawText(win,lbuf,sx+4,ry,lc,bg6);
+                    lnum++;ry+=8;
+                }
+            }
+        }
+        break;}
+    default: break;
+    }
+}
+
+static void browser_click(int mx,int my){
+    AppWin*w=&_wins[W_BROWSER];
+    int sx=w->x+1,sy=w->y+TBAR_H,sw=w->w-2;
+    int ny=sy+22,cay=ny+26;
+    /* Bouton Retour */
+    if(mx>=sx+2&&mx<sx+16&&my>=ny&&my<ny+26){
+        if(_bpage==5||_bpage==6)_bnav(2);else if(_bpage>0)_bnav(_bpage-1);return;
+    }
+    /* Bouton Suivant */
+    if(mx>=sx+16&&mx<sx+30&&my>=ny&&my<ny+26){if(_bpage<4)_bnav(_bpage+1);return;}
+    /* Barre URL */
+    int ux=sx+50,uw=sw-56;
+    if(mx>=ux&&mx<ux+uw&&my>=ny+3&&my<ny+23){_burl_foc=1;_bsearch_foc=0;return;}
+    _burl_foc=0;_bsearch_foc=0;
+    /* Clics specifiques a la page */
+    if(_bpage==0){
+        int cx2=sx+sw/2;
+        static const int tpg[4]={1,2,4,3};
+        for(int i=0;i<4;i++){
+            int tx2=cx2-170+i*88,ty2=cay+88;
+            if(mx>=tx2&&mx<tx2+76&&my>=ty2&&my<ty2+48){_bnav(tpg[i]);return;}
+        }
+    } else if(_bpage==2){
+        /* Clic sur la barre de recherche Google */
+        int gy=cay+28,qx=sx+sw/2-170,qy=gy+40,qw=340;
+        if(mx>=qx&&mx<qx+qw&&my>=qy&&my<qy+36){_bsearch_foc=1;return;}
+        /* Clic sur le bouton "Recherche Google" */
+        int bx=sx+sw/2-52,by=qy+44;
+        if(mx>=bx&&mx<bx+104&&my>=by&&my<by+28){
+            if(_bsearch_len>0)_bnav(5);return;
+        }
+    } else if(_bpage==5){
+        /* Clic sur un resultat */
+        int ry=cay+94;
+        const int*pgmap;
+        static const int pe_pg[4]={1,1,1,4};
+        static const int gh_pg[4]={4,4,4,4};
+        static const int lx_pg[4]={3,3,4,3};
+        static const int gn_pg[4]={3,1,4,3};
+        if(strstr(_bsearch,"pitech"))pgmap=pe_pg;
+        else if(strstr(_bsearch,"ithub")||strstr(_bsearch,"itlab"))pgmap=gh_pg;
+        else if(strstr(_bsearch,"inux")||strstr(_bsearch,"ernel")||strstr(_bsearch,"myos")||strstr(_bsearch,"MyOS")||strstr(_bsearch,"nasm"))pgmap=lx_pg;
+        else pgmap=gn_pg;
+        for(int i=0;i<4;i++){
+            int iry=ry+i*60;
+            if(mx>=sx+6&&mx<sx+sw-6&&my>=iry&&my<iry+37){_bnav(pgmap[i]);return;}
+        }
+    }
 }
 
 /* ============================================================
@@ -1268,6 +2264,12 @@ static void draw_bg(sfcml_Window* win){
             (uint8_t)((int)C_DK.g*(i+1)/9),
             (uint8_t)((int)C_DK.b*(i+1)/9)));
     }
+    for(int y=0;y<448;y+=20)
+        for(int x=44;x<640;x+=20)
+            sfcml_drawPixel(win,x,y,sfcml_rgb(
+                (uint8_t)((int)C_DK.r/4+20<255?(int)C_DK.r/4+20:255),
+                (uint8_t)((int)C_DK.g/4+20<255?(int)C_DK.g/4+20:255),
+                (uint8_t)((int)C_DK.b/4+20<255?(int)C_DK.b/4+20:255)));
 }
 
 /* ============================================================
@@ -1287,6 +2289,9 @@ static void redraw(sfcml_Window* win){
         else if(i==W_CODE)      draw_code(win,i);
         else if(i==W_WORD)      draw_word(win,i);
         else if(i==W_SETTINGS)  draw_settings(win,i);
+        else if(i==W_BROWSER)   draw_browser(win,i);
+        else if(i==W_CALC)      draw_calc(win,i);
+        else if(i==W_FILES)     draw_files(win,i);
     }
     draw_taskbar(win);
     if(_start_open)draw_smenu(win);
@@ -1329,6 +2334,7 @@ static void paint_click(int mx,int my){
  * Gestion des clics
  * ============================================================ */
 static void on_press(int mx,int my,int btn){
+    if(_sleeping){_sleeping=0;_inact_secs=0;return;}
     if(btn==1){_rcopen=1;_rcx=mx;_rcy=my;_start_open=0;return;}
     if(_rcopen){rcmenu_click(mx,my);return;}
     if(_start_open){smenu_click(mx,my);return;}
@@ -1358,6 +2364,9 @@ static void on_press(int mx,int my,int btn){
         if(hit_tb(i,mx,my)){_drag_win=i;_drag_ox=mx-w->x;_drag_oy=my-w->y;return;}
         if(i==W_PAINT){paint_click(mx,my);return;}
         if(i==W_SETTINGS){settings_click(mx,my);return;}
+        if(i==W_BROWSER){browser_click(mx,my);return;}
+        if(i==W_CALC){calc_click(mx,my);return;}
+        if(i==W_FILES){files_click(mx,my);return;}
         return;
     }
     /* Icons */
@@ -1373,7 +2382,8 @@ static void on_press(int mx,int my,int btn){
             else if(found==4)win_open(W_CREEP);
             else if(found==5)win_open(W_ABOUT);
             else if(found==6)cmd_reboot();
-            else win_open(W_SETTINGS);
+            else if(found==7)win_open(W_SETTINGS);
+            else{win_open(W_BROWSER);_bnav(0);}
         }
         _sel_icon=found;
     } else {_sel_icon=-1;_start_open=0;_rcopen=0;}
@@ -1386,8 +2396,10 @@ void kmain(void){
     if(!sfcml_init())for(;;)__asm__ volatile("hlt");
     sfcml_Window* win=sfcml_createWindow("MyOS");
     win->font=(uint8_t*)font8x8;
+    __asm__ volatile("fninit"); /* init FPU pour les calculs float (Mandelbrot) */
     sfcml_mouseInit();
     rtc_read();
+    net_init();
 
     C_DK     = sfcml_rgb(0,  48, 90);
     C_TB     = sfcml_rgb(14, 50,110);
@@ -1437,10 +2449,43 @@ void kmain(void){
                 break;
 
             case SFCML_EVT_KEY_PRESSED:{
+                if(_sleeping){_sleeping=0;_inact_secs=0;break;}
                 int foc=_focus;
                 int fopen=(foc>=0&&_wins[foc].visible&&!_wins[foc].minimized);
                 if(fopen&&foc==W_SETTINGS){
                     if(evt.key.code==SFCML_KEY_ESCAPE)_wins[W_SETTINGS].minimized=1;
+                } else if(fopen&&foc==W_CALC){
+                    if(evt.key.code==SFCML_KEY_ESCAPE)_wins[W_CALC].minimized=1;
+                    else if(evt.key.code==SFCML_KEY_RETURN)calc_press('=');
+                    else if(evt.key.code==SFCML_KEY_BACKSPACE){
+                        int l=(int)strlen(_calc_disp);
+                        if(l>1){_calc_disp[l-1]='\0';}else{_calc_disp[0]='0';_calc_disp[1]='\0';_calc_new=1;}
+                    }
+                } else if(fopen&&foc==W_BROWSER){
+                    if(_bsearch_foc){
+                        if(evt.key.code==SFCML_KEY_RETURN){if(_bsearch_len>0)_bnav(5);_bsearch_foc=0;}
+                        else if(evt.key.code==SFCML_KEY_ESCAPE){_bsearch_foc=0;}
+                        else if(evt.key.code==SFCML_KEY_BACKSPACE){if(_bsearch_len>0)_bsearch[--_bsearch_len]='\0';}
+                    } else if(_burl_foc){
+                        if(evt.key.code==SFCML_KEY_RETURN){_burl_nav();_burl_foc=0;}
+                        else if(evt.key.code==SFCML_KEY_ESCAPE){_burl_foc=0;}
+                        else if(evt.key.code==SFCML_KEY_BACKSPACE){if(_burl_len>0)_burl[--_burl_len]='\0';}
+                    } else {
+                        if(evt.key.code==SFCML_KEY_ESCAPE)_wins[W_BROWSER].minimized=1;
+                    }
+                } else if(fopen&&foc==W_FILES){
+                    if(_fi_edit){
+                        if(evt.key.code==SFCML_KEY_ESCAPE)_fi_edit=0;
+                        else fi_key(evt.key.code);
+                    } else {
+                        if(evt.key.code==SFCML_KEY_ESCAPE)_wins[W_FILES].minimized=1;
+                        else if(evt.key.code==SFCML_KEY_RETURN){
+                            const char*fn=_fi_files[_fi_dir][_fi_sel];
+                            if(fn&&fn[0]){int is_dir=(fn[0]>='A'&&fn[0]<='Z'&&fn[1]>='a'&&!strchr(fn,'.'));if(!is_dir)fi_edit_open();}
+                        }
+                        else if(evt.key.code==SFCML_KEY_UP){if(_fi_sel>0)_fi_sel--;}
+                        else if(evt.key.code==SFCML_KEY_DOWN){if(_fi_sel<5)_fi_sel++;}
+                    }
                 } else if(fopen&&foc==W_CODE){
                     if(evt.key.code==SFCML_KEY_ESCAPE)_wins[W_CODE].minimized=1;
                     else code_key(evt.key.code);
@@ -1472,7 +2517,17 @@ void kmain(void){
                 int foc=_focus;
                 int fopen=(foc>=0&&_wins[foc].visible&&!_wins[foc].minimized);
                 char ch=evt.text.ch;
-                if(fopen&&foc==W_CODE)code_text(ch);
+                if(fopen&&foc==W_CALC){
+                    if((ch>='0'&&ch<='9')||ch=='+'||ch=='-'||ch=='*'||ch=='/'||ch=='.'||ch=='%')
+                        calc_press(ch);
+                    else if(ch=='='||ch=='\n')calc_press('=');
+                    else if(ch=='c'||ch=='C')calc_press('C');
+                } else if(fopen&&foc==W_BROWSER&&_bsearch_foc){
+                    if(ch>=32&&_bsearch_len<BURL_MAX){_bsearch[_bsearch_len++]=ch;_bsearch[_bsearch_len]='\0';}
+                } else if(fopen&&foc==W_BROWSER&&_burl_foc){
+                    if(ch>=32&&_burl_len<BURL_MAX){_burl[_burl_len++]=ch;_burl[_burl_len]='\0';}
+                } else if(fopen&&foc==W_FILES&&_fi_edit)fi_text(ch);
+                else if(fopen&&foc==W_CODE)code_text(ch);
                 else if(fopen&&foc==W_WORD)word_text(ch);
                 else if(foc==W_TERM&&_wins[W_TERM].visible&&!_wins[W_TERM].minimized){
                     if(ch>=32&&_tilen<T_COLS){_tinput[_tilen++]=ch;_tinput[_tilen]='\0';}

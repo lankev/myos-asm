@@ -1,15 +1,21 @@
-#include <sfcml.h>
-#include <stdlib.h>
-#include <string.h>
-#include <stdio.h>
-#include <stdint.h>
+#include "sfcml.h"
+#include "stdlib.h"
+#include "string.h"
+#include "stdio.h"
+#include "stdint.h"
 
 /* ============================================================
  * Lignes
  * ============================================================ */
 
 void sfcml_drawHLine(sfcml_Window* win, int x, int y, int len, sfcml_Color c) {
-    for (int i = 0; i < len; i++) sfcml_drawPixel(win, x + i, y, c);
+    if(!win->back||(unsigned)y>=win->height)return;
+    if(x<0){len+=x;x=0;}
+    if(x+(int)len>(int)win->width)len=(int)win->width-x;
+    if(len<=0)return;
+    uint8_t*p=win->back+(uint32_t)y*win->pitch+(uint32_t)x*3;
+    uint8_t cb=c.b,cg=c.g,cr=c.r;
+    for(int i=0;i<len;i++){*p++=cb;*p++=cg;*p++=cr;}
 }
 
 void sfcml_drawVLine(sfcml_Window* win, int x, int y, int len, sfcml_Color c) {
@@ -35,9 +41,17 @@ void sfcml_drawLine(sfcml_Window* win, int x0, int y0, int x1, int y1, sfcml_Col
  * ============================================================ */
 
 void sfcml_fillRect(sfcml_Window* win, sfcml_Rect r, sfcml_Color c) {
-    for (int y = r.y; y < r.y + r.h; y++)
-        for (int x = r.x; x < r.x + r.w; x++)
-            sfcml_drawPixel(win, x, y, c);
+    int x0=r.x,y0=r.y,x1=r.x+r.w,y1=r.y+r.h;
+    if(x0<0)x0=0;if(y0<0)y0=0;
+    if(x1>(int)win->width)x1=(int)win->width;
+    if(y1>(int)win->height)y1=(int)win->height;
+    if(x0>=x1||y0>=y1||!win->back)return;
+    uint8_t cb=c.b,cg=c.g,cr=c.r;
+    int w=x1-x0;
+    for(int y=y0;y<y1;y++){
+        uint8_t*p=win->back+(uint32_t)y*win->pitch+(uint32_t)x0*3;
+        for(int x=0;x<w;x++){*p++=cb;*p++=cg;*p++=cr;}
+    }
 }
 
 void sfcml_drawRect(sfcml_Window* win, sfcml_Rect r, sfcml_Color c) {

@@ -1,7 +1,7 @@
 #ifndef _STDLIB_H
 #define _STDLIB_H
 
-#include <stdint.h>
+#include "stdint.h"
 
 void*  malloc (size_t size);
 void   free   (void* ptr);
@@ -19,5 +19,7 @@ int    max(int a, int b);
 
 void   exit(int code);
 void   abort(void);
+long          strtol (const char* s, char** endptr, int base);
+unsigned long strtoul(const char* s, char** endptr, int base);
 
 #endif

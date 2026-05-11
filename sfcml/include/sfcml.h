@@ -16,8 +16,8 @@
  *   [+10 dword] adresse police BIOS 8x8
  */
 
-#include <stdint.h>
-#include <stddef.h>
+#include "stdint.h"
+#include "stddef.h"
 
 /* ============================================================
  * Couleur

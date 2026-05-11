@@ -7,7 +7,7 @@
 [ORG 0x8000]
 
 KERNEL_SEG   equ 0x1000       ; adresse lineaire 0x10000
-KERNEL_SECTS equ 120          ; 120*512=61KB < 64KB => pas de frontiere DMA
+KERNEL_SECTS equ 128          ; 128*512=65536 => chunk 1
 KERNEL_CHS_S equ 18           ; CHS sector = LBA 17 + 1 = 18
 VGA          equ 0xB800
 TIMEOUT      equ 5
@@ -15,6 +15,9 @@ TIMEOUT      equ 5
 ; Zone memoire basse pour communiquer avec le kernel
 VESA_BUF     equ 0x2000       ; buffer temporaire 256 octets pour int 0x10
 BOOT_INFO    equ 0x0500       ; bloc info: [fb_addr:4][w:2][h:2][bpp:1][flag:1]
+BOOT_INFO_DRIVE  equ 0x050E   ; byte: boot drive
+BOOT_INFO_MEMLO  equ 0x0510   ; word: low mem KB (int 12h)
+BOOT_INFO_MEMHI  equ 0x0512   ; word: high mem KB (int 15h/88h)
 
 ; =============================================================
 ; Entry point
@@ -431,6 +434,7 @@ menu_loop:
 
     ; Lance MyOS
     call show_loading
+    call detect_memory
     call load_kernel
     call setup_vesa       ; active VESA 640x480x24bpp
     call setup_font       ; copie police BIOS 8x8 → 0x6000
@@ -458,6 +462,7 @@ show_loading:
 ; 96 secteurs * 512 = 49KB depuis 0x10000 => reste sous 0x20000 (pas de DMA overflow)
 ; =============================================================
 load_kernel:
+    ; Chunk 1: 128 sectors from CHS(0,0,18) -> ES=0x1000, BX=0 (physical 0x10000)
     mov ax, KERNEL_SEG
     mov es, ax
     xor bx, bx
@@ -469,7 +474,7 @@ load_kernel:
     mov dh, 0
     mov dl, [boot_drive]
     int 0x13
-    jnc .ok
+    jnc .chunk2
 
     mov bh, 23
     mov bl, 20
@@ -479,6 +484,22 @@ load_kernel:
     mov ah, 0x00
     int 0x16
     jmp $
+
+.chunk2:
+    ; Chunk 2: 128 sectors from CHS(4,0,2) -> ES=0x2000, BX=0 (physical 0x20000)
+    ; LBA 145 = cylinder 4, head 0, sector 2
+    mov ax, 0x2000
+    mov es, ax
+    xor bx, bx
+
+    mov ah, 0x02
+    mov al, 128
+    mov ch, 4          ; cylinder 4
+    mov cl, 2          ; sector 2
+    mov dh, 0          ; head 0
+    mov dl, [boot_drive]
+    int 0x13
+    ; if second chunk fails, just continue (may be empty)
 
 .ok:
     ret
@@ -587,6 +608,23 @@ setup_font:
 
     ; Stocke l'adresse de la police pour le kernel
     mov dword [BOOT_INFO + 10], 0x6000
+    ret
+
+; =============================================================
+; detect_memory: detecte la RAM et stocke dans BOOT_INFO
+; =============================================================
+detect_memory:
+    mov al, [boot_drive]
+    mov [BOOT_INFO_DRIVE], al
+
+    int 0x12
+    mov [BOOT_INFO_MEMLO], ax
+
+    mov ah, 0x88
+    int 0x15
+    jc .dm_done
+    mov [BOOT_INFO_MEMHI], ax
+.dm_done:
     ret
 
 ; =============================================================

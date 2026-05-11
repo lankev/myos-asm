@@ -1,8 +1,7 @@
-#include <stdio.h>
-#include <stdint.h>
-#include <string.h>
-#include <stdlib.h>
-
+#include "stdio.h"
+#include "stdint.h"
+#include "string.h"
+#include "stdlib.h"
 
 int putchar(int c) {
     _putchar((char)c);
@@ -88,19 +87,21 @@ static int _vfmt(_fmt_ctx* ctx, const char* fmt, va_list ap) {
         int width = 0;
         while (*fmt >= '0' && *fmt <= '9') width = width * 10 + (*fmt++ - '0');
 
+        int is_long = 0;
+        if (*fmt == 'l') { is_long = 1; fmt++; }
         char spec = *fmt++;
         switch (spec) {
         case 'd': case 'i':
-            _emit_int(ctx, va_arg(ap, int), 10, 0, width, pad_zero, left, plus ? '+' : 0);
+            _emit_int(ctx, is_long ? va_arg(ap, long) : (long)va_arg(ap, int), 10, 0, width, pad_zero, left, plus ? '+' : 0);
             break;
         case 'u':
-            _emit_int(ctx, (long)(unsigned)va_arg(ap, unsigned), 10, 0, width, pad_zero, left, 0);
+            _emit_int(ctx, is_long ? (long)va_arg(ap, unsigned long) : (long)(unsigned)va_arg(ap, unsigned), 10, 0, width, pad_zero, left, 0);
             break;
         case 'x':
-            _emit_int(ctx, (long)(unsigned)va_arg(ap, unsigned), 16, 0, width, pad_zero, left, 0);
+            _emit_int(ctx, is_long ? (long)va_arg(ap, unsigned long) : (long)(unsigned)va_arg(ap, unsigned), 16, 0, width, pad_zero, left, 0);
             break;
         case 'X':
-            _emit_int(ctx, (long)(unsigned)va_arg(ap, unsigned), 16, 1, width, pad_zero, left, 0);
+            _emit_int(ctx, is_long ? (long)va_arg(ap, unsigned long) : (long)(unsigned)va_arg(ap, unsigned), 16, 1, width, pad_zero, left, 0);
             break;
         case 'o':
             _emit_int(ctx, (long)(unsigned)va_arg(ap, unsigned), 8, 0, width, pad_zero, left, 0);

@@ -21,4 +21,11 @@ SECTIONS {
         *(COMMON)
         __bss_end = .;
     }
+
+    /DISCARD/ : {
+        *(.eh_frame)
+        *(.eh_frame_hdr)
+        *(.note.GNU-stack)
+        *(.comment)
+    }
 }

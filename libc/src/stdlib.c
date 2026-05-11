@@ -1,6 +1,6 @@
-#include <stdlib.h>
-#include <string.h>
-#include <stdint.h>
+#include "stdlib.h"
+#include "string.h"
+#include "stdint.h"
 
 /* ========== Heap (free-list allocateur) ==========
  * Heap place a 4 Mo, taille 4 Mo.
@@ -145,3 +145,29 @@ void exit(int code) {
 }
 
 void abort(void) { exit(1); }
+
+long strtol(const char* s, char** endptr, int base) {
+    while(*s==' '||*s=='\t')s++;
+    int neg=0;
+    if(*s=='-'){neg=1;s++;}else if(*s=='+')s++;
+    if(base==0){
+        if(*s=='0'&&(s[1]=='x'||s[1]=='X')){base=16;s+=2;}
+        else if(*s=='0')base=8;
+        else base=10;
+    }else if(base==16&&*s=='0'&&(s[1]=='x'||s[1]=='X'))s+=2;
+    long n=0;
+    while(1){
+        int d;
+        if(*s>='0'&&*s<='9')d=*s-'0';
+        else if(*s>='a'&&*s<='z')d=*s-'a'+10;
+        else if(*s>='A'&&*s<='Z')d=*s-'A'+10;
+        else break;
+        if(d>=base)break;
+        n=n*base+d;s++;
+    }
+    if(endptr)*endptr=(char*)s;
+    return neg?-n:n;
+}
+unsigned long strtoul(const char* s, char** endptr, int base) {
+    return (unsigned long)strtol(s,endptr,base);
+}

@@ -1,7 +1,7 @@
-#include <sfcml.h>
-#include <stdlib.h>
-#include <string.h>
-#include <stdint.h>
+#include "sfcml.h"
+#include "stdlib.h"
+#include "string.h"
+#include "stdint.h"
 
 /* Boot info layout a 0x0500 (rempli par MineGRUB) */
 #define BOOT_INFO ((volatile uint8_t*)0x0500)
@@ -11,6 +11,9 @@
 #define BI_BPP      (*((volatile uint8_t* )(BOOT_INFO + 8)))
 #define BI_VESA     (*((volatile uint8_t* )(BOOT_INFO + 9)))
 #define BI_FONT     (*((volatile uint32_t*)(BOOT_INFO + 10)))
+#define BI_DRIVE    (*((volatile uint8_t* )(BOOT_INFO +14)))
+#define BI_MEMLO_KB (*((volatile uint16_t*)(BOOT_INFO +16)))
+#define BI_MEMHI_KB (*((volatile uint16_t*)(BOOT_INFO +18)))
 
 static sfcml_Window _win_singleton;
 static int _initialized = 0;

@@ -1,5 +1,5 @@
-#include <sfcml.h>
-#include <stdint.h>
+#include "sfcml.h"
+#include "stdint.h"
 
 /* ============================================================
  * Clavier PS/2 bare-metal
@@ -149,9 +149,10 @@ static const sfcml_KeyCode _sc_table[128] = {
 static uint8_t _shift = 0;
 static uint8_t _ctrl  = 0;
 static uint8_t _alt   = 0;
+static uint8_t _ext   = 0;
 
 /* File d'evenements circulaire */
-#define EVT_BUF 16
+#define EVT_BUF 32
 static sfcml_Event _evt_buf[EVT_BUF];
 static int _evt_head = 0, _evt_tail = 0;
 
@@ -173,7 +174,7 @@ static const char _ascii_lo[58] = {
     '=',0,0,'a','z','e','r','t','y','u','i','o','p',
     '^','$','\n',0,'q','s','d','f','g','h','j','k','l',
     'm',0,'`',0,'*','w','x','c','v','b','n',',',';',
-    ':','!',0,0,' '
+    ':','!',0,0,0,' '
 };
 
 static const char _ascii_hi[58] = {
@@ -181,14 +182,35 @@ static const char _ascii_hi[58] = {
     '=',0,0,'A','Z','E','R','T','Y','U','I','O','P',
     0,0,'\n',0,'Q','S','D','F','G','H','J','K','L',
     'M',0,0,0,'*','W','X','C','V','B','N','?','.',
-    '/',0,0,0,' '
+    '/',0,0,0,0,' '
 };
 
 static void _process_scancode(uint8_t sc) {
+    if (sc == 0xE0) { _ext = 1; return; }
+
     int released = (sc & 0x80) != 0;
     uint8_t code = sc & 0x7F;
 
-    /* Modificateurs */
+    if (_ext) {
+        _ext = 0;
+        if (code == 0x1D) { _ctrl = !released; return; }
+        if (code == 0x38) { _alt  = !released; return; }
+        if (!released) {
+            sfcml_KeyCode kc = SFCML_KEY_NONE;
+            if      (code == 0x48) kc = SFCML_KEY_UP;
+            else if (code == 0x50) kc = SFCML_KEY_DOWN;
+            else if (code == 0x4B) kc = SFCML_KEY_LEFT;
+            else if (code == 0x4D) kc = SFCML_KEY_RIGHT;
+            if (kc) {
+                sfcml_Event e = {0};
+                e.type = SFCML_EVT_KEY_PRESSED;
+                e.key.code = kc; e.key.shift=_shift; e.key.ctrl=_ctrl; e.key.alt=_alt;
+                _evt_push(e);
+            }
+        }
+        return;
+    }
+
     if (code == 0x2A || code == 0x36) { _shift = !released; return; }
     if (code == 0x1D) { _ctrl  = !released; return; }
     if (code == 0x38) { _alt   = !released; return; }
@@ -201,7 +223,6 @@ static void _process_scancode(uint8_t sc) {
     e.key.alt   = _alt;
     _evt_push(e);
 
-    /* Genere aussi un event TEXT pour les caracteres imprimables */
     if (!released && code < 58) {
         char ch = _shift ? _ascii_hi[code] : _ascii_lo[code];
         if (ch) {

@@ -1,7 +1,7 @@
 #ifndef _STDIO_H
 #define _STDIO_H
 
-#include <stdint.h>
+#include "stdint.h"
 
 /* Fourni par l'OS ou l'application : sortie d'un seul caractere */
 extern void _putchar(char c);

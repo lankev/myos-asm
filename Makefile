@@ -7,7 +7,8 @@ CC   = gcc
 CFLAGS = -m32 -ffreestanding -nostdlib -nostartfiles \
          -fno-pic -fno-pie \
          -O2 -Wall -Wextra -Wno-array-bounds \
-         -Ilibc/include -Isfcml/include
+         -fno-asynchronous-unwind-tables \
+         -Ilibc/include -Isfcml/include -Inet
 
 AR   = ar
 
@@ -18,9 +19,11 @@ AR   = ar
 
 LIBC_SRC = libc/src/string.c libc/src/stdlib.c libc/src/stdio.c
 SFCML_SRC = sfcml/src/window.c sfcml/src/graphics.c sfcml/src/events.c
+NET_SRC  = net/net.c
 
 LIBC_OBJ  = $(patsubst %.c, $(BUILD)/%.o, $(LIBC_SRC))
 SFCML_OBJ = $(patsubst %.c, $(BUILD)/%.o, $(SFCML_SRC))
+NET_OBJ   = $(patsubst %.c, $(BUILD)/%.o, $(NET_SRC))
 
 .PHONY: all libs clean run debug
 
@@ -55,7 +58,8 @@ $(BUILD)/myos.img: $(BUILD)/boot.bin $(BUILD)/minegrub.bin $(BUILD)/kernel.bin
 	dd if=/dev/zero           bs=512 count=2880 of=$@            2>/dev/null
 	dd if=$(BUILD)/boot.bin   bs=512 count=1    of=$@ seek=0  conv=notrunc 2>/dev/null
 	dd if=$(BUILD)/minegrub.bin bs=512 count=16 of=$@ seek=1  conv=notrunc 2>/dev/null
-	dd if=$(BUILD)/kernel.bin bs=512 count=120  of=$@ seek=17 conv=notrunc 2>/dev/null
+	dd if=$(BUILD)/kernel.bin bs=512 count=128  of=$@ seek=17  conv=notrunc 2>/dev/null
+	dd if=$(BUILD)/kernel.bin bs=512 skip=128 count=128 of=$@ seek=145 conv=notrunc 2>/dev/null || true
 	@echo "[IMG] $(BUILD)/myos.img pret"
 	@ls -lh $(BUILD)/
 
@@ -78,10 +82,16 @@ $(BUILD)/kernel/kmain.o: kernel/kmain.c
 	@mkdir -p $(dir $@)
 	$(CC) $(CFLAGS) -c $< -o $@
 
+$(BUILD)/net/%.o: net/%.c
+	@mkdir -p $(dir $@)
+	$(CC) $(CFLAGS) -c $< -o $@
+
 $(BUILD)/kernel.elf: $(BUILD)/kernel/crt0.o $(BUILD)/kernel/kmain.o \
+                     $(NET_OBJ) \
                      $(BUILD)/libsfcml.a $(BUILD)/libk.a
 	ld -m elf_i386 -T kernel/kernel.ld -o $@ \
 		$(BUILD)/kernel/crt0.o $(BUILD)/kernel/kmain.o \
+		$(NET_OBJ) \
 		-L$(BUILD) -lsfcml -lk
 	@echo "[LD] $@"
 
@@ -91,7 +101,8 @@ $(BUILD)/kernel.bin: $(BUILD)/kernel.elf
 
 QFLAGS = -drive file=$(BUILD)/myos.img,format=raw,if=floppy \
          -boot a -no-reboot -no-shutdown \
-         -vga std -m 128M
+         -vga std -m 128M \
+         -netdev user,id=net0 -device rtl8139,netdev=net0
 
 run: all
 	$(QEMU) $(QFLAGS)
