@@ -5,6 +5,27 @@
 #include "font8x8.h"
 #include "../net/net.h"
 
+/* ============================================================
+ * Resolution ecran
+ * ============================================================ */
+#define SCR_W  800
+#define SCR_H  600
+#define TB_Y   (SCR_H - 31)   /* y de la taskbar */
+
+/* Forward decls needed by nano/DVFS code inserted before their definitions */
+#define W_WORD 5
+static void win_open(int idx);
+static void sh_nano(const char* a);
+#define W_SNAKE    11
+#define W_RTYPE    12
+#define W_PONG     13
+static void snake_reset(void);
+static void draw_snake(sfcml_Window* win, int wi);
+static void rtype_reset(void);
+static void draw_rtype(sfcml_Window* win, int wi);
+static void pong_reset(void);
+static void draw_pong(sfcml_Window* win, int wi);
+
 void _putchar(char c) { (void)c; }
 #define BIOS_TICKS (*(volatile uint32_t*)0x046C)
 
@@ -77,15 +98,17 @@ static void draw_big_text(sfcml_Window* w,const char* s,int x,int y,
  * ============================================================ */
 static void splash_delay(uint32_t n){for(uint32_t i=0;i<n;i++)__asm__ volatile("nop");}
 static void draw_splash(sfcml_Window* win){
+    int sw=(int)win->width,sh=(int)win->height;
+    int cx=sw/2,cy=sh/2;
     sfcml_Color bk=SFCML_BLACK,rd=sfcml_rgb(220,20,20);
     sfcml_Color gr=sfcml_rgb(150,150,150),wh=SFCML_WHITE;
-    sfcml_fillRect(win,sfcml_rect(0,0,640,480),bk);
-    draw_big_text(win,"EPITECH",208,158,4,rd,bk);
-    sfcml_fillRect(win,sfcml_rect(208,200,224,3),rd);
-    sfcml_drawText(win,"L'expertise informatique - epitech.eu",165,218,gr,bk);
-    sfcml_drawText(win,"Epitech Technology  |  Barcelone, Espagne",196,462,gr,bk);
-    sfcml_drawText(win,"Demarrage du systeme...",232,240,wh,bk);
-    int bx=200,by=390,bw=240,bh=14;
+    sfcml_fillRect(win,sfcml_rect(0,0,sw,sh),bk);
+    draw_big_text(win,"EPITECH",cx-112,cy-122,4,rd,bk);
+    sfcml_fillRect(win,sfcml_rect(cx-112,cy-82,224,3),rd);
+    sfcml_drawText(win,"L'expertise informatique - epitech.eu",cx-148,cy-62,gr,bk);
+    sfcml_drawText(win,"Epitech Technology  |  Barcelone, Espagne",cx-164,sh-18,gr,bk);
+    sfcml_drawText(win,"Demarrage du systeme...",cx-88,cy,wh,bk);
+    int bx=cx-120,by=sh-90,bw=240,bh=14;
     sfcml_drawRect(win,sfcml_rect(bx,by,bw,bh),sfcml_rgb(60,10,10));
     sfcml_present(win);
     for(int s=1;s<=30;s++){
@@ -141,49 +164,545 @@ static void t_hist_add(void){
     _thpos=-1;
 }
 
-/* Commandes shell */
+/* ============================================================
+ * Shell - systeme de fichiers virtuel
+ * ============================================================ */
+#define SH_NDIRS 16
+static const char* _sh_dirs[SH_NDIRS]={
+    "/","/bin","/boot","/dev","/etc","/home",
+    "/home/root","/lib","/mnt","/proc","/sys",
+    "/tmp","/usr","/usr/bin","/usr/lib","/var"
+};
+typedef struct{const char*n;}SHFile;
+static const SHFile _sh_files[SH_NDIRS][8]={
+    {{"bin"},{"boot"},{"dev"},{"etc"},{"home"},{"proc"},{"tmp"},{"var"}},
+    {{"sh"},{"ls"},{"cat"},{"echo"},{"grep"},{"cp"},{"mv"},{"rm"}},
+    {{"kernel.bin"},{"minegrub.bin"},{"boot.bin"},{"stage1"},{"stage2"},{""},{""},{""} },
+    {{"null"},{"zero"},{"random"},{"tty0"},{"hda"},{""},{""},{""} },
+    {{"hostname"},{"passwd"},{"fstab"},{"motd"},{"os-release"},{""},{""},{""} },
+    {{"root"},{""},{""},{""},{""},{""},{""},{""} },
+    {{".bashrc"},{"Desktop"},{"Documents"},{"Downloads"},{""},{""},{""},{""} },
+    {{"libc.a"},{"libsfcml.a"},{"libk.a"},{""},{""},{""},{""},{""} },
+    {{"floppy"},{""},{""},{""},{""},{""},{""},{""} },
+    {{"cpuinfo"},{"meminfo"},{"version"},{"uptime"},{"net"},{""},{""},{""} },
+    {{"kernel"},{"bus"},{"devices"},{""},{""},{""},{""},{""} },
+    {{""},{""},{""},{""},{""},{""},{""},{""} },
+    {{"bin"},{"lib"},{"include"},{"share"},{""},{""},{""},{""} },
+    {{"gcc"},{"nasm"},{"make"},{"ld"},{"ar"},{"objcopy"},{""},{""} },
+    {{""},{""},{""},{""},{""},{""},{""},{""} },
+    {{"log"},{"tmp"},{"run"},{""},{""},{""},{""},{""} },
+};
+static int  _cwd_idx=0;
+static char _cwd[64]="/";
+
+/* ============================================================
+ * VFS dynamique — fichiers crees par l'utilisateur
+ * ============================================================ */
+#define DVFS_MAX  48
+#define DVFS_PLEN 56
+#define DVFS_CLEN 512
+
+typedef struct {
+    char path[DVFS_PLEN];
+    char content[DVFS_CLEN];
+    int  is_dir;
+    int  used;
+} DVFSEntry;
+
+static DVFSEntry _dvfs[DVFS_MAX];
+
+static DVFSEntry* _dvfs_find(const char* p){
+    for(int i=0;i<DVFS_MAX;i++)
+        if(_dvfs[i].used&&!strcmp(_dvfs[i].path,p))return &_dvfs[i];
+    return 0;
+}
+static DVFSEntry* _dvfs_create(const char* p,int is_dir){
+    DVFSEntry* e=_dvfs_find(p);if(e)return e;
+    for(int i=0;i<DVFS_MAX;i++){
+        if(!_dvfs[i].used){
+            strncpy(_dvfs[i].path,p,DVFS_PLEN-1);_dvfs[i].path[DVFS_PLEN-1]='\0';
+            _dvfs[i].content[0]='\0';_dvfs[i].is_dir=is_dir;_dvfs[i].used=1;
+            return &_dvfs[i];
+        }
+    }
+    return 0;
+}
+static void _dvfs_remove(const char* p){DVFSEntry*e=_dvfs_find(p);if(e)e->used=0;}
+static void _dvfs_fullpath(const char* name,char* out,int olen){
+    if(name[0]=='/'){strncpy(out,name,olen-1);out[olen-1]='\0';return;}
+    int cl=(int)strlen(_cwd);strncpy(out,_cwd,olen-1);out[olen-1]='\0';
+    if(out[cl-1]!='/'&&cl<olen-2){out[cl]='/';out[cl+1]='\0';cl++;}
+    strncat(out,name,(size_t)(olen-cl-1));
+}
+static int _dvfs_in_dir(const DVFSEntry* e,int dir_idx){
+    const char* dir=_sh_dirs[dir_idx];
+    int dl=(int)strlen(dir),el=(int)strlen(e->path);
+    if(el<=dl)return 0;
+    if(strncmp(e->path,dir,(size_t)dl)!=0)return 0;
+    if(dir[dl-1]=='/')return !strchr(e->path+dl,'/');
+    if(e->path[dl]!='/')return 0;
+    return !strchr(e->path+dl+1,'/');
+}
+static const char* _dvfs_basename2(const DVFSEntry* e,int dir_idx){
+    const char* dir=_sh_dirs[dir_idx];
+    int dl=(int)strlen(dir);
+    if(dir[dl-1]=='/')return e->path+dl;
+    return e->path+dl+1;
+}
+
+/* Path du fichier ouvert dans nano */
+static char _nano_path[DVFS_PLEN]="";
+
+/* _nano_save and sh_nano defined after word-processor variables below */
+
+/* forward decls for helpers defined later */
+static void _ip4str(uint32_t ip,char*buf);
+static void _mac6str(const uint8_t*mac,char*buf);
+
+/* ============================================================
+ * Shell - utilitaires internes
+ * ============================================================ */
 static void cmd_reboot(void){
     __asm__ volatile("outb %0,%1"::"a"((uint8_t)0xFE),"Nd"((uint16_t)0x64));
     for(;;)__asm__ volatile("hlt");
 }
-static void cmd_help(void){
-    t_print("Commandes: help clear about ls uname\n");
-    t_print("  time ping sudo echo fortune creeper\n");
-    t_print("  color matrix reboot shutdown date\n");
-    t_print("  whoami hostname uptime ps mem net\n");
+static void _sh_puti(int v){
+    char b[16];int o=0,neg=(v<0);
+    if(neg){b[o++]='-';v=-v;}
+    if(v==0){b[o++]='0';}
+    else{char r[12];int ri=0;while(v){r[ri++]='0'+v%10;v/=10;}while(ri--)b[o++]=r[ri];}
+    b[o]='\0';t_print(b);
 }
-static void cmd_about(void){
-    t_print("=== MyOS v0.1 - Epitech Edition ===\n");
-    t_print("CPU: x86 32-bit  RAM: 128MB\n");
-    t_print("GPU: VESA 640x480 24bpp\n");
-    t_print("Boot: MineGRUB  Libs: libk+SFCML\n");
+/* return pointer past first word (to args) */
+static const char* _sh_arg(const char*s){
+    while(*s&&*s!=' ')s++;
+    return *s?' '?s+1:s:s;
 }
-static void cmd_ls(void){
-    t_print("drwxr-xr-x  bin/ boot/ dev/ etc/\n");
-    t_print("-rwxr-xr-x  kernel.bin  initrd\n");
-    t_print("drwxr-xr-x  usr/ var/ home/ sys/\n");
+static int _sh_sw(const char*s,const char*p){return !strncmp(s,p,strlen(p));}
+
+/* ============================================================
+ * Shell - commandes filesystem
+ * ============================================================ */
+static int _sh_is_dir(const char*n){
+    for(int i=0;i<SH_NDIRS;i++){
+        const char*p=_sh_dirs[i];int pl=strlen(p),nl=strlen(n);
+        if(pl>nl&&p[pl-nl-1]=='/'&&!strcmp(p+pl-nl,n))return 1;
+        if(!strcmp(p,n))return 1;
+    }
+    return 0;
 }
-static void cmd_time(void){
-    uint32_t s=(uint32_t)_rtc.h*3600+(uint32_t)_rtc.m*60+_rtc.s;
-    char b[32];int o=0;
-    b[o++]='U';b[o++]='p';b[o++]=':';b[o++]=' ';
-    b[o++]='0'+s/3600/10;b[o++]='0'+s/3600%10;b[o++]='h';
-    b[o++]='0'+(s/60)%60/10;b[o++]='0'+(s/60)%60%10;b[o++]='m';
-    b[o++]='0'+s%60/10;b[o++]='0'+s%60%10;b[o++]='s';
+static void sh_ls(const char*a){
+    int dir=_cwd_idx;
+    if(a[0]){
+        for(int i=0;i<SH_NDIRS;i++){
+            if(!strcmp(_sh_dirs[i],a)){dir=i;break;}
+            int l=strlen(_sh_dirs[i]);
+            if(l>1&&!strcmp(_sh_dirs[i]+l-strlen(a),a)&&_sh_dirs[i][l-strlen(a)-1]=='/')
+                {dir=i;break;}
+        }
+    }
+    for(int i=0;i<8;i++){
+        const char*fn=_sh_files[dir][i].n;
+        if(!fn||!fn[0])continue;
+        t_print(_sh_is_dir(fn)?"drwxr-xr-x ":"lrwxrwxrwx ");
+        t_print(fn);t_print("\n");
+    }
+    /* Fichiers dynamiques */
+    for(int i=0;i<DVFS_MAX;i++){
+        if(!_dvfs[i].used)continue;
+        if(!_dvfs_in_dir(&_dvfs[i],dir))continue;
+        const char* bn=_dvfs_basename2(&_dvfs[i],dir);
+        if(!bn||!bn[0])continue;
+        t_print(_dvfs[i].is_dir?"drwxr-xr-x ":"-rw-r--r-- ");
+        t_print(bn);t_print("\n");
+    }
+}
+static void sh_cat(const char*a){
+    if(!a[0]){t_print("Usage: cat <fichier>\n");return;}
+    if(!strcmp(a,"/proc/cpuinfo")||!strcmp(a,"cpuinfo")){
+        t_print("processor : 0\nvendor_id : GenuineIntel\n");
+        t_print("model name: i386 MyOS CPU @ 1GHz\n");
+        t_print("cpu MHz   : 1000.000\ncache size: 256 KB\n");
+        return;}
+    if(!strcmp(a,"/proc/meminfo")||!strcmp(a,"meminfo")){
+        t_print("MemTotal:   131072 kB\nMemFree:    98304 kB\n");
+        t_print("Buffers:     4096 kB\nCached:      8192 kB\n");return;}
+    if(!strcmp(a,"/proc/version")||!strcmp(a,"version")){
+        t_print("MyOS version 0.1 (gcc 12.2.0)\n");return;}
+    if(!strcmp(a,"/etc/hostname")||!strcmp(a,"hostname")){
+        t_print("myos.epitech.eu\n");return;}
+    if(!strcmp(a,"/etc/os-release")||!strcmp(a,"os-release")){
+        t_print("NAME=\"MyOS\"\nVERSION=\"0.1 Epitech\"\n");
+        t_print("ID=myos\nHOME_URL=epitech.eu\n");return;}
+    if(!strcmp(a,"/etc/motd")||!strcmp(a,"motd")){
+        t_print("Welcome to MyOS v0.1 - Epitech\n");
+        t_print("Type 'help' for available commands.\n");return;}
+    if(!strcmp(a,"/etc/fstab")||!strcmp(a,"fstab")){
+        t_print("/dev/hda  /     ext2  defaults 0 1\n");
+        t_print("none      /proc proc  defaults 0 0\n");return;}
+    if(!strcmp(a,"/etc/passwd")||!strcmp(a,"passwd")){
+        t_print("root:x:0:0:root:/root:/bin/sh\n");
+        t_print("nobody:x:65534:65534::/:\n");return;}
+    if(!strcmp(a,"/proc/uptime")||!strcmp(a,"uptime")){
+        _sh_puti((int)(BIOS_TICKS/18));t_print(" 0\n");return;}
+    /* Fichier dynamique VFS */
+    {char fp[DVFS_PLEN];_dvfs_fullpath(a,fp,DVFS_PLEN);
+    DVFSEntry*e=_dvfs_find(fp);
+    if(!e)e=_dvfs_find(a);
+    if(e&&!e->is_dir){
+        if(e->content[0]){t_print(e->content);t_print("\n");}
+        else t_print("(fichier vide)\n");
+        return;
+    }}
+    /* fallback: search vfs */
+    for(int i=0;i<SH_NDIRS;i++)
+        for(int j=0;j<8;j++)
+            if(_sh_files[i][j].n[0]&&!strcmp(_sh_files[i][j].n,a)){
+                t_print("(fichier binaire)\n");return;}
+    t_print(a);t_print(": Aucun fichier ou repertoire\n");
+}
+static void sh_cd(const char*a){
+    if(!a[0]||!strcmp(a,"~")){_cwd_idx=6;strcpy(_cwd,"/home/root");return;}
+    if(!strcmp(a,"..")){
+        if(_cwd_idx==0)return;
+        char par[64];strcpy(par,_sh_dirs[_cwd_idx]);
+        int l=(int)strlen(par);
+        while(l>0&&par[l-1]!='/')l--;
+        if(l>1)l--;par[l]='\0';if(l==0){par[0]='/';par[1]='\0';}
+        for(int i=0;i<SH_NDIRS;i++)
+            if(!strcmp(_sh_dirs[i],par)){_cwd_idx=i;strcpy(_cwd,par);return;}
+        return;
+    }
+    char full[64];const char*target=a;
+    if(a[0]!='/'){
+        int cl=(int)strlen(_cwd);strcpy(full,_cwd);
+        if(_cwd[cl-1]!='/'){full[cl]='/';full[cl+1]='\0';}
+        strncat(full,a,62);target=full;
+    }
+    for(int i=0;i<SH_NDIRS;i++)
+        if(!strcmp(_sh_dirs[i],target)){
+            _cwd_idx=i;strncpy(_cwd,target,63);_cwd[63]='\0';return;}
+    t_print(a);t_print(": Repertoire inexistant\n");
+}
+static void sh_find(const char*a){
+    const char*p=a[0]?a:_cwd;
+    t_print(p);t_print("\n");
+    int pl=(int)strlen(p);
+    for(int i=0;i<SH_NDIRS;i++)
+        if(!strncmp(_sh_dirs[i],p,(size_t)pl)&&strlen(_sh_dirs[i])>(size_t)pl)
+            {t_print(_sh_dirs[i]);t_print("\n");}
+}
+static void sh_grep(const char*a){
+    if(!a[0]){t_print("Usage: grep <motif> [fichier]\n");return;}
+    char pat[32];int i=0;
+    while(a[i]&&a[i]!=' '&&i<31){pat[i]=a[i];i++;}pat[i]='\0';
+    t_print("grep: motif '");t_print(pat);t_print("': aucun resultat\n");
+}
+static void sh_wc(const char*a){
+    if(!a[0]){t_print("Usage: wc <fichier>\n");return;}
+    t_print("  0  0  0 ");t_print(a);t_print("\n");
+}
+static void sh_stat(const char*a){
+    if(!a[0]){t_print("Usage: stat <fichier>\n");return;}
+    t_print("  Fichier: ");t_print(a);t_print("\n");
+    t_print("  Taille: 0  Mode: 644  Uid: 0\n");
+    t_print("  Acces:  2026-01-01 00:00:00\n");
+}
+static void sh_file(const char*a){
+    if(!a[0]){t_print("Usage: file <nom>\n");return;}
+    t_print(a);
+    if(strstr(a,".c")||strstr(a,".h"))t_print(": C source, ASCII text\n");
+    else if(strstr(a,".asm"))       t_print(": NASM source, ASCII\n");
+    else if(strstr(a,".bin")||strstr(a,".elf"))t_print(": ELF 32-bit executable\n");
+    else if(strstr(a,".a"))         t_print(": ar archive\n");
+    else                            t_print(": ASCII text\n");
+}
+
+/* ============================================================
+ * Shell - commandes systeme
+ * ============================================================ */
+static void sh_uname(const char*a){
+    if(!strcmp(a,"-r"))t_print("0.1\n");
+    else if(!strcmp(a,"-m")||!strcmp(a,"-p"))t_print("i386\n");
+    else if(!strcmp(a,"-s"))t_print("MyOS\n");
+    else if(!strcmp(a,"-n"))t_print("myos.epitech.eu\n");
+    else if(!strcmp(a,"-v"))t_print("#1 SMP 2026 Epitech\n");
+    else t_print("MyOS 0.1 myos 0.1 i386 GNU/Linux\n");
+}
+static void sh_date(void){
+    static const char*wn[7]={"Dim","Lun","Mar","Mer","Jeu","Ven","Sam"};
+    static const char*mn[12]={"Jan","Fev","Mar","Avr","Mai","Jun",
+                               "Jul","Aou","Sep","Oct","Nov","Dec"};
+    int wd=(int)((_rtc.day+_rtc.mon+_rtc.year)%7);
+    int mi=(_rtc.mon>=1&&_rtc.mon<=12)?_rtc.mon-1:0;
+    char b[48];int o=0;
+    const char*d=wn[wd<0?0:wd];const char*m=mn[mi];
+    for(int k=0;d[k];k++)b[o++]=d[k];b[o++]=' ';
+    for(int k=0;m[k];k++)b[o++]=m[k];b[o++]=' ';
+    b[o++]='0'+_rtc.day/10;b[o++]='0'+_rtc.day%10;b[o++]=' ';
+    b[o++]='0'+_rtc.h/10;b[o++]='0'+_rtc.h%10;b[o++]=':';
+    b[o++]='0'+_rtc.m/10;b[o++]='0'+_rtc.m%10;b[o++]=':';
+    b[o++]='0'+_rtc.s/10;b[o++]='0'+_rtc.s%10;b[o++]=' ';
+    b[o++]='0'+(_rtc.year/1000)%10;b[o++]='0'+(_rtc.year/100)%10;
+    b[o++]='0'+(_rtc.year/10)%10;b[o++]='0'+_rtc.year%10;
     b[o++]='\n';b[o]='\0';t_print(b);
 }
-static void cmd_ping(const char* a){
-    t_print("PING ");t_print(a[0]?a:"epitech.eu");t_print("\n");
-    t_print("64 bytes: icmp_seq=1 ttl=64 time=0.1ms\n");
-    t_print("2 paquets: 0% perte\n");
+static void sh_uptime(void){
+    uint32_t s=BIOS_TICKS/18;
+    t_print(" up ");_sh_puti((int)s/3600);t_print("h");
+    _sh_puti((int)(s/60)%60);t_print("m  load avg: 0.00 0.00\n");
 }
-static void cmd_fortune(void){
-    static int fi=0;
-    static const char* f[4]={"Creeper, Aw Man...\n","make: Error 1\n",
-        "rm -rf /* : Ouf.\n","42h sans dormir = 1 semaine.\n"};
-    t_print(f[fi++%4]);
+static void sh_ps(void){
+    t_print("  PID TTY  STAT CMD\n");
+    t_print("    1 ?    Ss   init\n");
+    t_print("    2 ?    S    kthreadd\n");
+    t_print("    3 ?    S    kmain\n");
+    t_print("    4 ?    S    myos-wm\n");
+    t_print("   10 tty0 R    sh\n");
+    t_print("   11 tty0 R+   ps\n");
 }
-static void cmd_color(const char* a){
+static void sh_top(void){
+    t_print("Tasks:  6 running\n");
+    t_print("CPU: 0.1%us  Mem: 131072k\n\n");
+    t_print("  PID  %CPU  %MEM  CMD\n");
+    t_print("    1   0.0   0.0  init\n");
+    t_print("    3   0.0   0.5  kmain\n");
+    t_print("   10   0.1   0.0  sh\n");
+}
+static void sh_free(void){
+    t_print("             total    used    free\n");
+    t_print("Mem:        131072   32768   98304\n");
+    t_print("Swap:            0       0       0\n");
+}
+static void sh_df(void){
+    t_print("Filesystem   Size  Used Avail Use%\n");
+    t_print("/dev/hda     1.4M  890K  510K  64%\n");
+    t_print("tmpfs         64M    0K   64M   0%\n");
+}
+static void sh_lscpu(void){
+    t_print("Architecture: i386\n");
+    t_print("CPU op-mode : 32-bit\n");
+    t_print("CPU(s)      : 1\n");
+    t_print("Vendor ID   : GenuineIntel\n");
+    t_print("Model name  : i386 compatible\n");
+    t_print("CPU MHz     : 1000.000\n");
+    t_print("L1d cache   : 16K\nL2 cache    : 256K\n");
+}
+static void sh_lspci(void){
+    t_print("00:00.0 Host bridge: Intel i440FX\n");
+    t_print("00:01.0 ISA bridge : Intel PIIX3\n");
+    t_print("00:02.0 VGA        : Standard VESA\n");
+    t_print("00:03.0 Ethernet   : Realtek RTL8139\n");
+    t_print("00:04.0 Audio      : Intel AC97\n");
+}
+static void sh_lsmod(void){
+    t_print("Module      Size  Used by\n");
+    t_print("rtl8139     8192  0\n");
+    t_print("ps2kbd      4096  0\n");
+    t_print("ps2mouse    4096  0\n");
+    t_print("vesa        8192  0\n");
+}
+static void sh_dmesg(void){
+    t_print("[    0.000] MyOS kernel started\n");
+    t_print("[    0.001] Protected mode active\n");
+    t_print("[    0.002] VESA VBE 640x480 24bpp\n");
+    t_print("[    0.003] PS/2 keyboard detected\n");
+    t_print("[    0.004] PS/2 mouse detected\n");
+    t_print("[    0.005] PCI bus scan: 5 devices\n");
+    t_print("[    0.006] RTL8139 at 00:03.0\n");
+    t_print("[    0.010] MineGRUB handoff done\n");
+}
+
+/* ============================================================
+ * Shell - commandes reseau
+ * ============================================================ */
+static void sh_ifconfig(void){
+    char buf[24];
+    if(net_ok){
+        t_print("eth0  Link encap:Ethernet\n");
+        t_print("      HWaddr ");_mac6str(net_mac,buf);t_print(buf);t_print("\n");
+        t_print("      inet addr:");_ip4str(net_my_ip,buf);t_print(buf);
+        t_print("  Mask:");_ip4str(net_netmask,buf);t_print(buf);t_print("\n");
+        t_print("      Bcast:");_ip4str(0xFFFFFFFF,buf);t_print(buf);t_print("\n");
+        t_print("      UP BROADCAST RUNNING  MTU:1500\n");
+    }else{
+        t_print("eth0: DOWN (reseau non disponible)\n");
+    }
+    t_print("\nlo    inet addr:127.0.0.1  Mask:255.0.0.0\n");
+    t_print("      UP LOOPBACK RUNNING  MTU:65536\n");
+}
+static void sh_ip(const char*a){
+    if(!strncmp(a,"a",1)||!strncmp(a,"addr",4)||!strncmp(a,"link",4)||a[0]=='\0')
+        sh_ifconfig();
+    else if(!strncmp(a,"route",5)||!strncmp(a,"r",1)){
+        char buf[20];
+        t_print("default via ");
+        _ip4str(net_gw_ip,buf);t_print(buf);t_print(" dev eth0\n");
+        t_print("10.0.2.0/24 dev eth0\n");
+    }
+    else{t_print("ip: sous-commande inconnue\n");}
+}
+static void sh_ping(const char*a){
+    const char*host=a[0]?a:"127.0.0.1";
+    t_print("PING ");t_print(host);t_print(" 56(84) bytes\n");
+    if(net_ok){
+        t_print("64 bytes from ");t_print(host);
+        t_print(": icmp_seq=1 ttl=64 time=0.42ms\n");
+        t_print("64 bytes from ");t_print(host);
+        t_print(": icmp_seq=2 ttl=64 time=0.38ms\n");
+        t_print("3 paquets transmis, 0% de perte\n");
+    }else{
+        t_print("connect: Network unreachable\n");
+    }
+}
+static void sh_netstat(void){
+    char buf[20];
+    t_print("Proto  LocalAddr          ForeignAddr  State\n");
+    if(net_ok){
+        t_print("udp    ");_ip4str(net_my_ip,buf);t_print(buf);
+        t_print(":68    0.0.0.0:0     LISTEN\n");
+    }
+    t_print("tcp    127.0.0.1:0       127.0.0.1:0  LISTEN\n");
+}
+static void sh_nslookup(const char*a){
+    if(!a[0]){t_print("Usage: nslookup <host>\n");return;}
+    char buf[20];
+    t_print("Server:  ");_ip4str(net_dns_ip,buf);t_print(buf);t_print("\n");
+    t_print("Address: ");t_print(a);t_print(" = ");
+    t_print(net_ok?"10.0.2.15":"(reseau non disponible)");t_print("\n");
+}
+static void sh_traceroute(const char*a){
+    if(!a[0]){t_print("Usage: traceroute <host>\n");return;}
+    char buf[20];
+    t_print("traceroute to ");t_print(a);t_print("\n");
+    t_print(" 1  ");_ip4str(net_gw_ip,buf);t_print(buf);t_print("  1ms\n");
+    t_print(" 2  * * *\n 3  * * *\n");
+}
+
+/* ============================================================
+ * Shell - commandes environnement
+ * ============================================================ */
+static void sh_env(void){
+    t_print("PATH=/bin:/usr/bin\n");
+    t_print("HOME=/home/root\nUSER=root\n");
+    t_print("SHELL=/bin/sh\n");
+    t_print("PWD=");t_print(_cwd);t_print("\n");
+    t_print("TERM=myos-vt\nLANG=fr_FR.UTF-8\n");
+    t_print("HOSTNAME=myos.epitech.eu\n");
+}
+static void sh_printenv(const char*a){
+    if(!a[0]){sh_env();return;}
+    if(!strcmp(a,"PATH"))t_print("/bin:/usr/bin\n");
+    else if(!strcmp(a,"HOME"))t_print("/home/root\n");
+    else if(!strcmp(a,"USER"))t_print("root\n");
+    else if(!strcmp(a,"SHELL"))t_print("/bin/sh\n");
+    else if(!strcmp(a,"PWD")){t_print(_cwd);t_print("\n");}
+    else if(!strcmp(a,"TERM"))t_print("myos-vt\n");
+    else if(!strcmp(a,"HOSTNAME"))t_print("myos.epitech.eu\n");
+    else{t_print(a);t_print(": non defini\n");}
+}
+static void sh_which(const char*a){
+    if(!a[0]){t_print("Usage: which <cmd>\n");return;}
+    static const char*bincmds[]={"ls","cat","echo","grep","find","ps","top","free",
+        "df","kill","date","uname","whoami","hostname","ping","sh","bash","cp","mv",
+        "rm","mkdir","touch","chmod","chown","sort","uniq","head","tail","wc","tr",
+        "cut","seq","yes","sleep","env","printenv","which","man","stat","file",0};
+    for(int i=0;bincmds[i];i++)
+        if(!strcmp(a,bincmds[i])){t_print("/bin/");t_print(a);t_print("\n");return;}
+    t_print(a);t_print(": not found\n");
+}
+static void sh_man(const char*a){
+    if(!a[0]){t_print("Usage: man <commande>\n");return;}
+    t_print("MAN(1) -- ");t_print(a);t_print("\n\n");
+    if(!strcmp(a,"ls"))      t_print("ls [-la] [DIR] -- liste le repertoire\n");
+    else if(!strcmp(a,"cd")) t_print("cd [DIR] -- changer de repertoire\n");
+    else if(!strcmp(a,"cat"))t_print("cat FILE -- afficher un fichier\n");
+    else if(!strcmp(a,"grep"))t_print("grep MOTIF [FILE] -- rechercher\n");
+    else if(!strcmp(a,"ps")) t_print("ps -- lister les processus\n");
+    else if(!strcmp(a,"ping"))t_print("ping HOST -- tester la connectivite\n");
+    else if(!strcmp(a,"free"))t_print("free -- afficher la memoire\n");
+    else if(!strcmp(a,"df")) t_print("df -- espace disque\n");
+    else if(!strcmp(a,"top"))t_print("top -- moniteur de processus\n");
+    else if(!strcmp(a,"find"))t_print("find [PATH] -- trouver des fichiers\n");
+    else t_print("Pas de page man pour cette commande.\n");
+    t_print("\nq pour quitter.\n");
+}
+
+/* ============================================================
+ * Shell - commandes texte et fun
+ * ============================================================ */
+static void sh_history(void){
+    for(int i=0;i<_thlen;i++){
+        t_print("  ");_sh_puti(i+1);t_print("  ");t_print(_thist[i]);t_print("\n");}
+}
+static void sh_cal(void){
+    static const char*mon[12]={"Janvier","Fevrier","Mars","Avril","Mai","Juin",
+        "Juillet","Aout","Septembre","Octobre","Novembre","Decembre"};
+    int mi=(_rtc.mon>=1&&_rtc.mon<=12)?_rtc.mon-1:0;
+    t_print("   ");t_print(mon[mi]);t_print(" ");
+    char yr[5];yr[0]='0'+(_rtc.year/1000)%10;yr[1]='0'+(_rtc.year/100)%10;
+    yr[2]='0'+(_rtc.year/10)%10;yr[3]='0'+_rtc.year%10;yr[4]='\0';
+    t_print(yr);t_print("\n");
+    t_print("Lu Ma Me Je Ve Sa Di\n");
+    t_print(" 1  2  3  4  5  6  7\n");
+    t_print(" 8  9 10 11 12 13 14\n");
+    t_print("15 16 17 18 19 20 21\n");
+    t_print("22 23 24 25 26 27 28\n");
+    t_print("29 30 31\n");
+}
+static void sh_seq(const char*a){
+    if(!a[0]){t_print("Usage: seq N\n");return;}
+    int n=0;for(int i=0;a[i]>='0'&&a[i]<='9';i++)n=n*10+(a[i]-'0');
+    if(n>20)n=20;
+    for(int i=1;i<=n;i++){_sh_puti(i);t_print("\n");}
+}
+static void sh_yes(const char*a){
+    const char*msg=(a[0]?a:"y");
+    for(int i=0;i<10;i++){t_print(msg);t_print("\n");}
+}
+static void sh_sleep(const char*a){
+    (void)a;
+    uint32_t t0=BIOS_TICKS;
+    while(BIOS_TICKS-t0<18)__asm__ volatile("pause");
+}
+static void sh_banner(const char*a){
+    if(!a[0]){t_print("Usage: banner <texte>\n");return;}
+    t_print("\n");
+    for(int l=0;l<8;l++){
+        for(int ci=0;a[ci]&&ci<7;ci++){
+            const uint8_t*g=font8x8+(unsigned char)a[ci]*8;
+            for(int b=0;b<8;b++)t_print((g[l]&(1<<b))?"#":" ");
+        }
+        t_print("\n");
+    }
+    t_print("\n");
+}
+static void sh_cowsay(const char*a){
+    const char*msg=(a[0]?a:"Meuuuh!");
+    int l=(int)strlen(msg);
+    t_print(" ");for(int i=0;i<l+2;i++)t_print("-");t_print("\n");
+    t_print("< ");t_print(msg);t_print(" >\n");
+    t_print(" ");for(int i=0;i<l+2;i++)t_print("-");t_print("\n");
+    t_print("        \\   ^__^\n");
+    t_print("         \\  (oo)\\_____\n");
+    t_print("            (__)\\      )\n");
+    t_print("                ||----w |\n");
+}
+static void sh_fortune(void){
+    static int _fi=0;
+    static const char*f[8]={
+        "Creeper, Aw Man...\n",
+        "make: *** Error 1\n",
+        "rm -rf /*  -- Ouf.\n",
+        "42h sans dormir = hacker.\n",
+        "There's no place like 127.0.0.1\n",
+        "sudo make me a sandwich.\n",
+        "The answer is 42.\n",
+        ":(){:|:&};: [fork bomb!]\n",
+    };
+    t_print(f[_fi++%8]);
+}
+static void sh_color(const char*a){
     if(!strncmp(a,"red",3))C_FG=sfcml_rgb(255,80,80);
     else if(!strncmp(a,"green",5))C_FG=SFCML_GREEN;
     else if(!strncmp(a,"cyan",4))C_FG=SFCML_CYAN;
@@ -192,63 +711,1040 @@ static void cmd_color(const char* a){
     else{t_print("Usage: color red|green|cyan|white|yellow\n");return;}
     t_print("Couleur changee.\n");
 }
+
+/* ============================================================
+ * Shell - utilitaires hex/math
+ * ============================================================ */
+static void _sh_puthex8(unsigned v){
+    static const char h[]="0123456789abcdef";
+    char b[9];b[8]='\0';for(int i=7;i>=0;i--){b[i]=h[v&0xF];v>>=4;}t_print(b);
+}
+static void _sh_puthex(unsigned v){
+    if(!v){t_print("0");return;}
+    static const char hx[]="0123456789abcdef";
+    char b[12];int o=11;b[o]='\0';while(v){b[--o]=hx[v&0xF];v>>=4;}t_print(b+o);
+}
+static int _parse_int(const char*s,int*i){
+    int neg=(s[*i]=='-');if(neg)(*i)++;
+    int v=0;while(s[*i]>='0'&&s[*i]<='9')v=v*10+(s[(*i)++]-'0');
+    return neg?-v:v;
+}
+
+/* ============================================================
+ * Shell - nouvelles commandes systeme avance
+ * ============================================================ */
+static void sh_who(void){
+    t_print("root     tty1  2026-01-01 00:00 (:0)\n");
+}
+static void sh_w(void){
+    char b[12];int o=0;
+    b[o++]='0'+_rtc.h/10;b[o++]='0'+_rtc.h%10;b[o++]=':';
+    b[o++]='0'+_rtc.m/10;b[o++]='0'+_rtc.m%10;b[o]='\0';
+    t_print(" ");t_print(b);t_print(" up 0:00,  1 user,  load: 0.00\n");
+    t_print("USER     TTY    FROM  LOGIN@  IDLE  WHAT\n");
+    t_print("root     tty1   -     00:00   0.00s sh\n");
+}
+static void sh_last(void){
+    t_print("root   tty1        Mon Jan  1 00:00  still logged in\n");
+    t_print("reboot system boot Mon Jan  1 00:00 - 00:00\n");
+    t_print("wtmp begins Mon Jan  1 00:00:00 2026\n");
+}
+static void sh_tty(void){t_print("/dev/tty1\n");}
+static void sh_nproc(void){t_print("1\n");}
+static void sh_vmstat(void){
+    t_print(" r  b  swpd   free   buff  cache  si  so  bi  bo\n");
+    t_print(" 1  0     0  98304   4096   8192   0   0   0   0\n");
+}
+static void sh_iostat(void){
+    t_print("avg-cpu: %user  %sys  %iowait  %idle\n");
+    t_print("          0.0    0.1     0.0    99.9\n\n");
+    t_print("Device  tps  kB_read/s  kB_wrtn/s\n");
+    t_print("hda     0.0       0.0        0.0\n");
+}
+static void sh_sysctl(const char*a){
+    if(!a[0]||!strcmp(a,"-a")){
+        t_print("kernel.hostname = myos.epitech.eu\n");
+        t_print("kernel.ostype = MyOS\nkernel.version = 0.1\n");
+        t_print("kernel.pid_max = 32768\n");
+        t_print("vm.swappiness = 60\nnet.ipv4.ip_forward = 0\n");
+        t_print("fs.file-max = 8192\n");return;
+    }
+    if(!strcmp(a,"kernel.hostname"))t_print("myos.epitech.eu\n");
+    else if(!strcmp(a,"vm.swappiness"))t_print("60\n");
+    else if(!strcmp(a,"kernel.pid_max"))t_print("32768\n");
+    else{t_print(a);t_print(": non trouve\n");}
+}
+static void sh_route(void){
+    char buf[20];
+    t_print("Destination  Gateway       Genmask         Iface\n");
+    t_print("0.0.0.0      ");_ip4str(net_gw_ip,buf);t_print(buf);
+    t_print("    0.0.0.0         eth0\n");
+    t_print("10.0.2.0     0.0.0.0       255.255.255.0   eth0\n");
+    t_print("127.0.0.0    0.0.0.0       255.0.0.0       lo\n");
+}
+static void sh_arp(void){
+    char buf[20];
+    t_print("Address          HWtype  HWaddress            Flags\n");
+    _ip4str(net_gw_ip,buf);t_print(buf);
+    t_print("  ether   52:54:00:12:34:56   C   eth0\n");
+}
+static void sh_iptables(const char*a){
+    (void)a;
+    t_print("Chain INPUT (policy ACCEPT 0 packets, 0 bytes)\n");
+    t_print("Chain FORWARD (policy DROP 0 packets, 0 bytes)\n");
+    t_print("Chain OUTPUT (policy ACCEPT 0 packets, 0 bytes)\n");
+}
+static void sh_dmidecode(void){
+    t_print("BIOS Information\n  Vendor: SeaBIOS\n  Version: 1.16\n");
+    t_print("System Information\n  Manufacturer: MyOS Project\n");
+    t_print("  Product: MyOS-Machine\n  Version: 0.1\n");
+    t_print("Processor\n  Family: Other\n  Version: i386 compatible\n");
+    t_print("  Speed: 1000 MHz\n  Core Count: 1\n");
+}
+static void sh_lshw(void){
+    t_print("*-system MyOS-Machine\n");
+    t_print("  *-core\n    *-cpu: i386 1GHz\n");
+    t_print("    *-memory: 128MB DRAM\n");
+    t_print("    *-pci\n");
+    t_print("      *-display: VESA VBE 640x480 24bpp\n");
+    t_print("      *-network: RTL8139 100Mbit/s\n");
+    t_print("      *-storage: IDE HDA 1.4MB\n");
+    t_print("      *-sound: Intel AC97\n");
+}
+static void sh_hdparm(const char*a){
+    const char*dev=a[0]?a:"/dev/hda";
+    t_print(dev);t_print(":\n");
+    t_print(" Model: MyOS Virtual Disk\n");
+    t_print(" SerialNo: 000000000001\n");
+    t_print(" Geometry: 3/16/63, sectors=2880, start=0\n");
+    t_print(" DMA: mdma0 mdma1 mdma2\n");
+}
+static void sh_acpi(void){
+    t_print("Battery 0: Discharging, 87%, 02:30:00 remaining\n");
+    t_print("Thermal 0: ok, 42.0 degrees C\n");
+    t_print("AC Adapter: off-line\n");
+}
+static void sh_sensors(void){
+    t_print("coretemp-isa-0000\nAdapter: ISA adapter\n");
+    t_print("Core 0: +42.0C  (high = +85.0C, crit = +100.0C)\n\n");
+    t_print("i440fx-pci-0000\nAdapter: PCI adapter\n");
+    t_print("VCore:  +1.25V\n3.3V:   +3.30V\n12V:   +12.04V\n");
+}
+static void sh_timedatectl(void){
+    char b[12];int o=0;
+    b[o++]='0'+_rtc.h/10;b[o++]='0'+_rtc.h%10;b[o++]=':';
+    b[o++]='0'+_rtc.m/10;b[o++]='0'+_rtc.m%10;b[o++]=':';
+    b[o++]='0'+_rtc.s/10;b[o++]='0'+_rtc.s%10;b[o]='\0';
+    t_print("      Local time: ");t_print(b);t_print(" CET\n");
+    t_print("  Universal time: ");t_print(b);t_print(" UTC\n");
+    t_print("        Timezone: Europe/Paris (CET, +0100)\n");
+    t_print("   NTP: inactive\n  RTC in local TZ: no\n");
+}
+static void sh_hwclock(void){
+    sh_date();
+    t_print("Hardware clock synced.\n");
+}
+static void sh_locale(void){
+    t_print("LANG=fr_FR.UTF-8\nLANGUAGE=fr_FR:fr\n");
+    t_print("LC_ALL=fr_FR.UTF-8\nLC_CTYPE=fr_FR.UTF-8\n");
+    t_print("LC_NUMERIC=fr_FR.UTF-8\nLC_TIME=fr_FR.UTF-8\n");
+    t_print("LC_COLLATE=fr_FR.UTF-8\n");
+}
+static void sh_systemctl(const char*a){
+    if(!strncmp(a,"list",4)||!a[0]){
+        t_print("UNIT              LOAD   ACTIVE  DESCRIPTION\n");
+        t_print("myos.service      loaded active  MyOS Kernel\n");
+        t_print("network.service   loaded active  Network Manager\n");
+        t_print("ps2kbd.service    loaded active  PS/2 Keyboard\n");
+        t_print("rtl8139.service   loaded active  RTL8139 NIC\n");
+        return;
+    }
+    if(!strncmp(a,"status",6)){
+        t_print("myos.service - MyOS Operating System\n");
+        t_print("   Loaded: loaded (/lib/systemd/system/myos.service)\n");
+        t_print("   Active: active (running) since boot\n");
+        t_print(" Main PID: 1 (init)\n");return;
+    }
+    t_print("systemctl: ");t_print(a);t_print(": simule\n");
+}
+static void sh_service(const char*a){
+    t_print("service: ");t_print(a[0]?a:"(?)");t_print(": simule\n");
+}
+static void sh_journalctl(void){
+    sh_dmesg();
+    t_print("[    0.020] eth0: RTL8139 initialise\n");
+    t_print("[    0.100] DHCP: offre recue de 10.0.2.2\n");
+    t_print("[    0.150] DHCP: ip=10.0.2.15 mask=255.255.255.0\n");
+    t_print("[    0.200] myos-wm: bureau demarre\n");
+}
+
+/* ============================================================
+ * Shell - nouvelles commandes processus
+ * ============================================================ */
+static void sh_pstree(void){
+    t_print("init(1)─┬─kthreadd(2)\n");
+    t_print("        ├─kmain(3)───myos-wm(4)\n");
+    t_print("        ├─net_poll(5)\n");
+    t_print("        └─sh(10)────ps(11)\n");
+}
+static void sh_pgrep(const char*a){
+    if(!a[0]){t_print("Usage: pgrep <nom>\n");return;}
+    if(!strcmp(a,"sh")||!strcmp(a,"bash"))t_print("10\n");
+    else if(!strcmp(a,"init"))t_print("1\n");
+    else if(!strcmp(a,"kmain"))t_print("3\n");
+    else t_print("(aucun processus)\n");
+}
+static void sh_pkill(const char*a){
+    if(!a[0]){t_print("Usage: pkill <nom>\n");return;}
+    t_print("pkill: ");t_print(a);t_print(": aucun processus tue\n");
+}
+static void sh_pidof(const char*a){
+    if(!a[0]){t_print("Usage: pidof <nom>\n");return;}
+    if(!strcmp(a,"sh")||!strcmp(a,"bash"))t_print("10\n");
+    else if(!strcmp(a,"init"))t_print("1\n");
+    else if(!strcmp(a,"kmain"))t_print("3\n");
+    else t_print("\n");
+}
+static void sh_renice(const char*a){
+    t_print("renice: ");t_print(a[0]?a:"?");t_print(": priorite ajustee\n");
+}
+
+/* ============================================================
+ * Shell - nouvelles commandes texte avance
+ * ============================================================ */
+static void sh_rev(const char*a){
+    if(!a[0]){t_print("Usage: rev <texte>\n");return;}
+    char b[T_COLS+1];int l=(int)strlen(a);if(l>T_COLS)l=T_COLS;
+    for(int i=0;i<l;i++)b[i]=a[l-1-i];b[l]='\0';
+    t_print(b);t_print("\n");
+}
+static void sh_fold(const char*a){
+    if(!a[0]){t_print("Usage: fold [-w N] <texte>\n");return;}
+    int w=40,i=0;
+    if(a[0]=='-'&&a[1]=='w'){
+        i=2;w=0;while(a[i]>='0'&&a[i]<='9')w=w*10+(a[i++]-'0');
+        while(a[i]==' ')i++;
+    }
+    if(w<1)w=40;
+    const char*s=a+i;int len=(int)strlen(s),col=0;
+    while(col<len){
+        int chunk=len-col;if(chunk>w)chunk=w;
+        char tmp[T_COLS+1];if(chunk>T_COLS)chunk=T_COLS;
+        strncpy(tmp,s+col,(size_t)chunk);tmp[chunk]='\0';
+        t_print(tmp);t_print("\n");col+=chunk;
+    }
+}
+static void sh_nl(const char*a){
+    t_print("     1\t");t_print(a[0]?a:"");t_print("\n");
+}
+static void sh_printf_cmd(const char*a){
+    char buf[T_COLS+1];int o=0,i=0;
+    for(;a[i]&&o<T_COLS;i++){
+        if(a[i]=='\\'&&a[i+1]){
+            i++;
+            if(a[i]=='n')buf[o++]='\n';
+            else if(a[i]=='t')buf[o++]='\t';
+            else buf[o++]=a[i];
+        }else buf[o++]=a[i];
+    }
+    buf[o]='\0';t_print(buf);
+}
+static void sh_basename(const char*a){
+    if(!a[0]){t_print("Usage: basename <path>\n");return;}
+    const char*p=a,*last=a;
+    while(*p){if(*p=='/')last=p+1;p++;}
+    t_print(last[0]?last:"/");t_print("\n");
+}
+static void sh_dirname_cmd(const char*a){
+    if(!a[0]){t_print("Usage: dirname <path>\n");return;}
+    char buf[64];int l=(int)strlen(a);if(l>63)l=63;
+    strncpy(buf,a,(size_t)l);buf[l]='\0';
+    while(l>1&&buf[l-1]=='/')buf[--l]='\0';
+    while(l>0&&buf[l-1]!='/')buf[--l]='\0';
+    if(l>1&&buf[l-1]=='/')buf[--l]='\0';
+    t_print(l>0?buf:"/");t_print("\n");
+}
+static void sh_xxd(const char*a){
+    const char*name=a[0]?a:"kernel";
+    unsigned char*ptr=(unsigned char*)0x10000;
+    for(int row=0;row<8;row++){
+        _sh_puthex((unsigned)(row*16));t_print(": ");
+        for(int c=0;c<16;c++){_sh_puthex8(ptr[row*16+c]);t_print(c==7?" ":"");}
+        t_print("  |");
+        for(int c=0;c<16;c++){
+            unsigned char ch=ptr[row*16+c];
+            char tmp[2]={(char)((ch>=32&&ch<127)?ch:'.'),0};t_print(tmp);
+        }
+        t_print("|\n");
+    }
+    t_print("(");t_print(name);t_print(": affichage partiel)\n");
+}
+static void sh_od(const char*a){
+    (void)a;
+    unsigned char*ptr=(unsigned char*)0x10000;
+    for(int row=0;row<4;row++){
+        char addr[12];int o=11;addr[o]='\0';
+        unsigned v=(unsigned)(row*16);
+        if(!v){addr[--o]='0';}else{while(v){addr[--o]='0'+v%8;v/=8;}}
+        t_print(addr+o);t_print(" ");
+        for(int c=0;c<8;c++){
+            unsigned w=(unsigned)ptr[row*16+c*2]*256+(unsigned)ptr[row*16+c*2+1];
+            char tmp[8];int to=7;tmp[to]='\0';
+            if(!w){tmp[--to]='0';}else{unsigned tw=w;while(tw){tmp[--to]='0'+tw%8;tw/=8;}}
+            t_print(tmp+to);t_print(" ");
+        }
+        t_print("\n");
+    }
+}
+static void sh_ascii_table(void){
+    t_print("Dec  Hex  Chr    Dec  Hex  Chr    Dec  Hex  Chr    Dec  Hex  Chr\n");
+    static const char*ctrl[32]={"NUL","SOH","STX","ETX","EOT","ENQ","ACK","BEL",
+        "BS ","HT ","LF ","VT ","FF ","CR ","SO ","SI ","DLE",
+        "DC1","DC2","DC3","DC4","NAK","SYN","ETB","CAN","EM ","SUB",
+        "ESC","FS ","GS ","RS ","US "};
+    static const char hd[]="0123456789abcdef";
+    for(int r=0;r<32;r++){
+        for(int col=0;col<4;col++){
+            int c=r+col*32;
+            char dn[5];int v=c,do_=4;dn[4]='\0';
+            if(!v){dn[--do_]='0';}else{while(v){dn[--do_]='0'+v%10;v/=10;}}
+            char hx[3];hx[0]=hd[c>>4];hx[1]=hd[c&0xF];hx[2]='\0';
+            t_print(dn+do_);t_print("   ");t_print(hx);t_print("    ");
+            if(c<32){t_print(ctrl[c]);}
+            else if(c==127){t_print("DEL");}
+            else{char ch[2]={(char)c,0};t_print(ch);t_print("  ");}
+            t_print("    ");
+        }
+        t_print("\n");
+    }
+}
+static void sh_column(const char*a){
+    if(!a[0]){t_print("Usage: column <texte>\n");return;}
+    t_print(a);t_print("\n");
+}
+static void sh_fmt(const char*a){
+    sh_fold(a[0]?a:"-w 72 texte");
+}
+
+/* ============================================================
+ * Shell - nouvelles commandes math
+ * ============================================================ */
+static void sh_factor(const char*a){
+    if(!a[0]){t_print("Usage: factor <n>\n");return;}
+    int n=0;for(int i=0;a[i]>='0'&&a[i]<='9';i++)n=n*10+(a[i]-'0');
+    _sh_puti(n);t_print(":");
+    if(n<2){t_print("\n");return;}
+    int tmp=n;
+    for(int d=2;(long long)d*d<=tmp;d++)
+        while(tmp%d==0){t_print(" ");_sh_puti(d);tmp/=d;}
+    if(tmp>1){t_print(" ");_sh_puti(tmp);}
+    t_print("\n");
+}
+static void sh_primes(const char*a){
+    int lim=50;
+    if(a[0]){lim=0;for(int i=0;a[i]>='0'&&a[i]<='9';i++)lim=lim*10+(a[i]-'0');}
+    if(lim>500)lim=500;
+    for(int n=2;n<=lim;n++){
+        int p=1;for(int d=2;d*d<=n&&p;d++)if(n%d==0)p=0;
+        if(p){_sh_puti(n);t_print(" ");}
+    }
+    t_print("\n");
+}
+static void sh_expr(const char*a){
+    if(!a[0]){t_print("Usage: expr N op M\n");return;}
+    int i=0;while(a[i]==' ')i++;
+    int x=_parse_int(a,&i);
+    while(a[i]==' ')i++;
+    char op=a[i];if(op)i++;
+    while(a[i]==' ')i++;
+    int y=_parse_int(a,&i);
+    int r=0;
+    if(!op||op=='+'){ r=op?x+y:x; }
+    else if(op=='-')r=x-y;
+    else if(op=='*'||op=='x')r=x*y;
+    else if(op=='/'&&y)r=x/y;
+    else if(op=='%'&&y)r=x%y;
+    else{t_print("expr: erreur de syntaxe\n");return;}
+    _sh_puti(r);t_print("\n");
+}
+static void sh_units(const char*a){
+    if(!a[0]){t_print("Usage: units <val> <de> <vers>\n");return;}
+    t_print("(conversion units simulee)\n");
+    t_print("Exemples: km->m *1000, kg->g *1000, C->F *9/5+32\n");
+}
+
+/* ============================================================
+ * Shell - archives et compression
+ * ============================================================ */
+static void sh_tar(const char*a){
+    if(!a[0]){t_print("Usage: tar [cvf|xvf|tf] <archive>\n");return;}
+    if(strstr(a,"t")||strstr(a,"l")){
+        t_print("kernel.bin\nminegrub.bin\nboot.bin\nkmain.c\n");return;}
+    t_print("tar: ");t_print(a);t_print(": simule\n");
+}
+static void sh_gzip(const char*a){
+    t_print("gzip: ");t_print(a[0]?a:"?");t_print(": simule (80% compression)\n");
+}
+static void sh_zip(const char*a){
+    t_print("zip: ");t_print(a[0]?a:"archive.zip");
+    t_print(": simule\n  adding: kernel.bin\n  adding: minegrub.bin\n");
+}
+
+/* ============================================================
+ * Shell - outils binaires
+ * ============================================================ */
+static void sh_objdump(const char*a){
+    const char*f=a[0]?a:"kernel.elf";
+    t_print(f);t_print(":     file format elf32-i386\n\n");
+    t_print("Disassembly of section .text:\n\n");
+    t_print("00010000 <_start>:\n");
+    t_print("   10000:  55           push   %ebp\n");
+    t_print("   10001:  89 e5        mov    %esp,%ebp\n");
+    t_print("   10003:  83 ec 10     sub    $0x10,%esp\n");
+    t_print("   10006:  e8 00 00     call   <kmain>\n");
+}
+static void sh_nm(const char*a){
+    const char*f=a[0]?a:"kernel.elf";
+    t_print(f);t_print(":\n");
+    t_print("00010000 T _start\n");
+    t_print("00010010 T kmain\n");
+    t_print("00020000 R font8x8\n");
+    t_print("00030000 B _win_singleton\n");
+    t_print("00090000 B _stack_top\n");
+    t_print("         U sfcml_init\n");
+}
+static void sh_strings(const char*a){
+    const char*f=a[0]?a:"kernel.elf";
+    t_print(f);t_print(":\n");
+    t_print("MyOS v0.1\nEpitech\nMineGRUB\n");
+    t_print("root@myos\n/bin/sh\n/home/root\n");
+    t_print("VESA 640x480\nRTL8139\nPS/2 OK\n");
+}
+static void sh_readelf(const char*a){
+    const char*f=a[0]?a:"kernel.elf";
+    t_print("ELF Header:\n  Magic: 7f 45 4c 46 01 01 01 00\n");
+    t_print("  Class: ELF32\n  Data: 2's complement, little endian\n");
+    t_print("  Type: EXEC\n  Machine: Intel 80386\n");
+    t_print("  Entry: 0x00010000\n");
+    t_print("  Sections: .text .rodata .bss\n");
+    (void)f;
+}
+static void sh_size(const char*a){
+    (void)a;
+    t_print("   text    data     bss     dec     hex filename\n");
+    t_print("  65536    4096    8192   77824   13000 kernel.elf\n");
+}
+
+/* ============================================================
+ * Shell - gestion utilisateurs
+ * ============================================================ */
+static void sh_useradd(const char*a){
+    if(!a[0]){t_print("Usage: useradd <nom>\n");return;}
+    t_print("useradd: utilisateur '");t_print(a);t_print("' cree (simule)\n");
+    t_print("Note: redemarrage requis pour appliquer\n");
+}
+static void sh_groups(void){t_print("root adm wheel sudo cdrom disk\n");}
+static void sh_finger(const char*a){
+    const char*u=a[0]?a:"root";
+    t_print("Login: ");t_print(u);
+    t_print(!strcmp(u,"root")?"  Name: Super-utilisateur\n":"  Name: Inconnu\n");
+    t_print("Directory: /home/");t_print(u);t_print("  Shell: /bin/sh\n");
+    t_print("On since 2026-01-01 00:00 on tty1\n");
+}
+static void sh_chsh(const char*a){
+    (void)a;
+    t_print("Changing shell for root.\n");
+    t_print("New shell [/bin/sh]: /bin/sh\n");
+    t_print("Shell changed.\n");
+}
+static void sh_passwd_cmd(void){
+    t_print("Changing password for root.\n");
+    t_print("New password: ****\n");
+    t_print("Retype new password: ****\n");
+    t_print("passwd: password updated (simule)\n");
+}
+
+/* ============================================================
+ * Shell - reseau avance
+ * ============================================================ */
+static void sh_host(const char*a){
+    if(!a[0]){t_print("Usage: host <domaine>\n");return;}
+    t_print(a);
+    if(!strncmp(a,"127",3))t_print(" has address 127.0.0.1\n");
+    else if(net_ok){char buf[20];_ip4str(net_dns_ip,buf);
+        t_print(" has address ");t_print(buf);t_print("\n");}
+    else t_print(": reseau non disponible\n");
+}
+static void sh_whois(const char*a){
+    t_print("% IANA WHOIS server\n");
+    t_print("% Querying: ");t_print(a[0]?a:"?");t_print("\n");
+    t_print("Domain: ");t_print(a[0]?a:"?");t_print("\nStatus: non disponible\n");
+}
+static void sh_nc(const char*a){
+    (void)a;
+    t_print("nc: connexion simulee\nConnected.\n");
+}
+static void sh_tcpdump(const char*a){
+    (void)a;
+    t_print("tcpdump: capturing on eth0 (verbosity 1)\n");
+    if(net_ok){
+        char buf[20];_ip4str(net_my_ip,buf);
+        t_print("10.0.2.15.68 > 10.0.2.2.67: BOOTP\n");
+        t_print(buf);t_print(" > 10.0.2.2: ICMP echo\n");
+    }
+    t_print("0 packets dropped\n");
+}
+static void sh_ethtool(void){
+    t_print("Settings for eth0:\n");
+    t_print("  Speed: 100Mb/s\n  Duplex: Full\n");
+    t_print("  Auto-negotiation: on\n  Link detected: yes\n");
+}
+
+/* ============================================================
+ * Shell - securite et crypto
+ * ============================================================ */
+static void sh_md5sum(const char*a){
+    if(!a[0]){t_print("Usage: md5sum <texte>\n");return;}
+    unsigned h0=0x67452301,h1=0xefcdab89,h2=0x98badcfe,h3=0x10325476;
+    for(int i=0;a[i];i++){unsigned c=(unsigned char)a[i];
+        h0=((h0<<5)|(h0>>27))^c;h1=((h1<<13)|(h1>>19))^(c*3);
+        h2=((h2<<7) |(h2>>25))^(c*7);h3=((h3<<11)|(h3>>21))^(c*11);}
+    _sh_puthex8(h0);_sh_puthex8(h1);_sh_puthex8(h2);_sh_puthex8(h3);
+    t_print("  ");t_print(a);t_print("\n");
+}
+static void sh_sha256sum(const char*a){
+    if(!a[0]){t_print("Usage: sha256sum <texte>\n");return;}
+    unsigned h[8]={0x6a09e667,0xbb67ae85,0x3c6ef372,0xa54ff53a,
+                   0x510e527f,0x9b05688c,0x1f83d9ab,0x5be0cd19};
+    for(int i=0;a[i];i++){unsigned c=(unsigned char)a[i];
+        for(int j=0;j<8;j++)h[j]=((h[j]<<(j+3))|(h[j]>>(32-j-3)))^(c<<(j&7));}
+    for(int i=0;i<8;i++)_sh_puthex8(h[i]);
+    t_print("  ");t_print(a);t_print("\n");
+}
+static void sh_base64(const char*a){
+    if(!a[0]){t_print("Usage: base64 <texte>\n");return;}
+    static const char B[]="ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    int l=(int)strlen(a),i=0;
+    char out[120];int o=0;
+    while(i<l&&o<116){
+        unsigned b0=(i<l)?(unsigned char)a[i++]:0;
+        unsigned b1=(i<l)?(unsigned char)a[i++]:0;
+        unsigned b2=(i<l)?(unsigned char)a[i++]:0;
+        out[o++]=B[(b0>>2)&0x3F];
+        out[o++]=B[((b0&3)<<4)|(b1>>4)];
+        out[o++]=(i>l+1)?'=':B[((b1&0xF)<<2)|(b2>>6)];
+        out[o++]=(i>l)?'=':B[b2&0x3F];
+    }
+    out[o]='\0';t_print(out);t_print("\n");
+}
+static void sh_openssl(const char*a){
+    if(!strncmp(a,"rand",4)){t_print("1a2b3c4d5e6f7890abcdef01\n");return;}
+    if(!strncmp(a,"md5",3)){sh_md5sum(_sh_arg(a));return;}
+    if(!strncmp(a,"sha",3)){sh_sha256sum(_sh_arg(a));return;}
+    if(!strncmp(a,"enc",3)){t_print("Encrypted (AES-256-CBC, simule)\n");return;}
+    t_print("OpenSSL 3.0.0 (simule)\nUsage: openssl rand|md5|sha256|enc\n");
+}
+static void sh_gpg(const char*a){
+    if(!strncmp(a,"--encrypt",9)||!strncmp(a,"-e",2))
+        {t_print("gpg: chiffrement AES256 simule\n");return;}
+    if(!strncmp(a,"--decrypt",9)||!strncmp(a,"-d",2))
+        {t_print("gpg: dechiffrement simule\n");return;}
+    if(!strncmp(a,"--sign",6)||!strncmp(a,"-s",2))
+        {t_print("gpg: signature RSA4096 simulee\n");return;}
+    t_print("gpg (GnuPG) 2.4.0 (simule)\n");
+    t_print("Usage: gpg --encrypt|--decrypt|--sign|--verify\n");
+}
+static void sh_ssh_keygen(void){
+    t_print("Generating public/private rsa key pair.\n");
+    t_print("Enter file: /root/.ssh/id_rsa\n");
+    t_print("Your identification: /root/.ssh/id_rsa\n");
+    t_print("Your public key: /root/.ssh/id_rsa.pub\n");
+    t_print("SHA256:xGFg2kPmR7nT4sL9qE1wY3uI0oP5aS6dF8hJ+KL=\n");
+    t_print("The key fingerprint is: RSA 4096 root@myos\n");
+}
+static void sh_checksec(const char*a){
+    const char*f=a[0]?a:"kernel.elf";
+    t_print("RELRO: Partial\nStack Canary: No\nNX: No\nPIE: No\n");
+    t_print("Fortify: No\nRunpath: None\n");(void)f;
+}
+
+/* ============================================================
+ * Shell - planification
+ * ============================================================ */
+static void sh_crontab(const char*a){
+    if(!strcmp(a,"-l")||!a[0]){
+        t_print("# Crontab de root\n# min  hr   dom  mon  dow  cmd\n");
+        t_print("  0    0    *    *    *   /bin/sync\n");
+        t_print("  */5  *    *    *    *   /bin/dmesg\n");return;
+    }
+    t_print("crontab: ");t_print(a);t_print(": simule\n");
+}
+static void sh_at(const char*a){
+    t_print("warning: commands will be executed using /bin/sh\n");
+    t_print("at> job queued at ");t_print(a[0]?a:"now");t_print("\n");
+    t_print("job 1 at 2026-01-01 00:01\n");
+}
+
+/* ============================================================
+ * Shell - divers
+ * ============================================================ */
+static void sh_wall(const char*a){
+    if(!a[0]){t_print("Usage: wall <message>\n");return;}
+    t_print("\nBroadcast message from root@myos (tty1):\n");
+    t_print(a);t_print("\n\n");
+}
+static void sh_watch(const char*a){
+    if(!a[0]){t_print("Usage: watch <commande>\n");return;}
+    t_print("Every 2.0s: ");t_print(a);t_print("\n");
+    t_print("(Ctrl+C pour arreter)\n");
+}
+static void sh_hack(void){
+    t_print("[ Initializing intrusion sequence... ]\n");
+    t_print("Scanning ports.................. [DONE]\n");
+    t_print("Bypassing firewall............. [DONE]\n");
+    t_print("Exploiting CVE-2026-1337....... [DONE]\n");
+    t_print("Downloading /etc/shadow........ [####] 100%\n");
+    t_print("Escalating privileges.......... [ROOT]\n");
+    t_print("Welcome, hacker. You own this machine.\n");
+}
+static void sh_fire(void){
+    t_print("         )   (\n");
+    t_print("        (    ) )\n");
+    t_print("        )  ( ((\n");
+    t_print("      (  )  ) )\n");
+    t_print("   _.-----.._/\n");
+    t_print("  /  Feu!   \\\n");
+}
+static void sh_rain(void){
+    t_print("|  |  |  | |  |  |  |\n");
+    t_print(" |  |  |  |  |  |  |\n");
+    t_print("|  |  |  |  | |  |  |\n");
+    t_print(" |  |  |  |  |  |  |\n");
+    t_print("|  |  |  | |  |  |  |\n");
+}
+static void sh_pipes(void){
+    t_print("    |    |    |\n");
+    t_print("====+====+====+====\n");
+    t_print("    |    |    |\n");
+    t_print("    +----+----+\n");
+    t_print("    |         |\n");
+    t_print("    +=========+\n");
+}
+static void sh_nyan(void){
+    t_print("~=[,,_,,]:3 ");
+    t_print("Nyan Nyan Nyan Nyan Nyan!\n");
+    t_print(",---,\n|*.*|\n'---'\n");
+    t_print("==========RAINBOW==========\n");
+}
+static void sh_lolcat(const char*a){
+    t_print(a[0]?a:"lolcat");t_print("\n(couleurs arc-en-ciel simulees)\n");
+}
+static void sh_toilet(const char*a){
+    sh_banner(a[0]?a:"MyOS");
+}
+static void sh_figlet(const char*a){
+    sh_banner(a[0]?a:"MyOS");
+}
+
+/* ============================================================
+ * Shell - handle_command
+ * ============================================================ */
 static void handle_command(void){
     t_hist_add();
     t_print("$ ");t_print(_tinput);t_print("\n");
-    char* inp=_tinput;
-    if(!strcmp(inp,"help"))cmd_help();
-    else if(!strcmp(inp,"clear")){for(int i=0;i<T_ROWS;i++)_tlines[i][0]='\0';_tnlines=0;}
-    else if(!strcmp(inp,"about"))cmd_about();
-    else if(!strcmp(inp,"ls")||!strncmp(inp,"ls ",3))cmd_ls();
-    else if(!strcmp(inp,"uname")||!strcmp(inp,"uname -a"))t_print("MyOS 0.1 i386 GNU/Epitech\n");
-    else if(!strcmp(inp,"time"))cmd_time();
-    else if(!strcmp(inp,"ping")||!strncmp(inp,"ping ",5))cmd_ping(strlen(inp)>5?inp+5:"");
-    else if(!strcmp(inp,"sudo")||!strncmp(inp,"sudo ",5))t_print("Permission accordee. Vous etes root.\n");
-    else if(!strncmp(inp,"echo ",5)){t_print(inp+5);t_print("\n");}
-    else if(!strcmp(inp,"fortune"))cmd_fortune();
-    else if(!strcmp(inp,"creeper"))t_print("Creeper, Aw Man...\nGot our pickaxe swinging!\n");
-    else if(!strncmp(inp,"color ",6))cmd_color(inp+6);
-    else if(!strcmp(inp,"matrix")){t_print("Wake up, Neo...\nThe Matrix has you.\n");}
-    else if(!strcmp(inp,"shutdown")||!strcmp(inp,"poweroff")){t_print("Arret...\n");cmd_reboot();}
-    else if(!strcmp(inp,"reboot")){t_print("Reboot...\n");cmd_reboot();}
-    else if(!strcmp(inp,"date")){
-        char b[32];int o=0;
-        b[o++]='0'+_rtc.day/10;b[o++]='0'+_rtc.day%10;b[o++]='/';
-        b[o++]='0'+_rtc.mon/10;b[o++]='0'+_rtc.mon%10;b[o++]='/';
-        b[o++]='0'+(_rtc.year/1000)%10;b[o++]='0'+(_rtc.year/100)%10;
-        b[o++]='0'+(_rtc.year/10)%10;b[o++]='0'+_rtc.year%10;b[o++]=' ';
+    char*inp=_tinput;
+    const char*arg=_sh_arg(inp);
+
+    /* filesystem */
+    if(!strcmp(inp,"ls")||_sh_sw(inp,"ls -")||_sh_sw(inp,"ls "))sh_ls(arg);
+    else if(!strcmp(inp,"ll"))sh_ls(arg);
+    else if(!strcmp(inp,"la"))sh_ls(arg);
+    else if(!strcmp(inp,"dir")||_sh_sw(inp,"dir "))sh_ls(arg);
+    else if(!strcmp(inp,"pwd"))t_print(_cwd),t_print("\n");
+    else if(!strcmp(inp,"cd")||_sh_sw(inp,"cd "))sh_cd(arg);
+    else if(!strcmp(inp,"cat")||_sh_sw(inp,"cat "))sh_cat(arg);
+    else if(!strcmp(inp,"less")||_sh_sw(inp,"less "))sh_cat(arg);
+    else if(!strcmp(inp,"more")||_sh_sw(inp,"more "))sh_cat(arg);
+    else if(!strcmp(inp,"mkdir")||_sh_sw(inp,"mkdir "))
+        {if(arg[0]){char fp[DVFS_PLEN];_dvfs_fullpath(arg,fp,DVFS_PLEN);_dvfs_create(fp,1);t_print("mkdir: ");t_print(arg);t_print(": cree\n");}else t_print("Usage: mkdir <nom>\n");}
+    else if(!strcmp(inp,"touch")||_sh_sw(inp,"touch "))
+        {if(arg[0]){char fp[DVFS_PLEN];_dvfs_fullpath(arg,fp,DVFS_PLEN);_dvfs_create(fp,0);t_print("touch: ");t_print(arg);t_print(": cree\n");}else t_print("Usage: touch <nom>\n");}
+    else if(!strcmp(inp,"rm")||_sh_sw(inp,"rm ")||
+            !strcmp(inp,"rmdir")||_sh_sw(inp,"rmdir "))
+        {if(arg[0]){char fp[DVFS_PLEN];_dvfs_fullpath(arg,fp,DVFS_PLEN);_dvfs_remove(fp);_dvfs_remove(arg);t_print("rm: ");t_print(arg);t_print(": supprime\n");}else t_print("Usage: rm <nom>\n");}
+    else if(!strcmp(inp,"cp")||_sh_sw(inp,"cp "))
+        {if(arg[0]){t_print("cp: ");t_print(arg);t_print(": ok\n");}else t_print("Usage: cp <src> <dst>\n");}
+    else if(!strcmp(inp,"mv")||_sh_sw(inp,"mv "))
+        {if(arg[0]){t_print("mv: ");t_print(arg);t_print(": ok\n");}else t_print("Usage: mv <src> <dst>\n");}
+    else if(!strcmp(inp,"nano")||_sh_sw(inp,"nano "))sh_nano(arg);
+    else if(!strcmp(inp,"vi")||_sh_sw(inp,"vi ")||!strcmp(inp,"vim")||_sh_sw(inp,"vim "))sh_nano(arg);
+    else if(!strcmp(inp,"find")||_sh_sw(inp,"find "))sh_find(arg);
+    else if(!strcmp(inp,"stat")||_sh_sw(inp,"stat "))sh_stat(arg);
+    else if(!strcmp(inp,"file")||_sh_sw(inp,"file "))sh_file(arg);
+    else if(!strcmp(inp,"ln")||_sh_sw(inp,"ln "))t_print("ln: ok\n");
+    else if(!strcmp(inp,"chmod")||_sh_sw(inp,"chmod "))t_print("chmod: ok\n");
+    else if(!strcmp(inp,"chown")||_sh_sw(inp,"chown "))t_print("chown: ok\n");
+    else if(!strcmp(inp,"chgrp")||_sh_sw(inp,"chgrp "))t_print("chgrp: ok\n");
+    /* texte */
+    else if(!strcmp(inp,"echo"))t_print("\n");
+    else if(_sh_sw(inp,"echo ")){
+        /* Detect redirection: echo text > file */
+        const char* gt=strchr(inp,'>');
+        if(gt){
+            const char* fn=gt+1;while(*fn==' ')fn++;
+            const char* content=inp+5;while(*content==' ')content++;
+            char fp[DVFS_PLEN];_dvfs_fullpath(fn,fp,DVFS_PLEN);
+            DVFSEntry*e=_dvfs_create(fp,0);
+            if(e){
+                int clen=(int)(gt-content);
+                /* trim trailing spaces */
+                while(clen>0&&content[clen-1]==' ')clen--;
+                /* remove surrounding quotes */
+                if(clen>1&&(content[0]=='"'||content[0]=='\'')){content++;clen-=2;}
+                if(clen<0)clen=0;
+                if(clen>DVFS_CLEN-2)clen=DVFS_CLEN-2;
+                memcpy(e->content,content,(size_t)clen);
+                e->content[clen]='\n';e->content[clen+1]='\0';
+            }
+            t_print("Ecrit dans: ");t_print(fn);t_print("\n");
+        }else{t_print(arg);t_print("\n");}
+    }
+    else if(!strcmp(inp,"grep")||_sh_sw(inp,"grep "))sh_grep(arg);
+    else if(!strcmp(inp,"head")||_sh_sw(inp,"head "))sh_cat(arg);
+    else if(!strcmp(inp,"tail")||_sh_sw(inp,"tail "))sh_cat(arg);
+    else if(!strcmp(inp,"wc")||_sh_sw(inp,"wc "))sh_wc(arg);
+    else if(!strcmp(inp,"sort")||_sh_sw(inp,"sort "))t_print("(stdin)\n");
+    else if(!strcmp(inp,"uniq")||_sh_sw(inp,"uniq "))t_print("(stdin)\n");
+    else if(!strcmp(inp,"cut")||_sh_sw(inp,"cut "))t_print("(stdin)\n");
+    else if(!strcmp(inp,"tr")||_sh_sw(inp,"tr "))t_print("(stdin)\n");
+    else if(!strcmp(inp,"tee")||_sh_sw(inp,"tee "))sh_cat(arg);
+    else if(!strcmp(inp,"xargs")||_sh_sw(inp,"xargs "))t_print("(stdin)\n");
+    else if(!strcmp(inp,"sed")||_sh_sw(inp,"sed "))t_print("(stdin)\n");
+    else if(!strcmp(inp,"awk")||_sh_sw(inp,"awk "))t_print("(stdin)\n");
+    /* systeme */
+    else if(!strcmp(inp,"uname")||_sh_sw(inp,"uname "))sh_uname(arg);
+    else if(!strcmp(inp,"arch"))t_print("i386\n");
+    else if(!strcmp(inp,"whoami"))t_print("root\n");
+    else if(!strcmp(inp,"id"))t_print("uid=0(root) gid=0(root)\n");
+    else if(!strcmp(inp,"hostname")||_sh_sw(inp,"hostname "))
+        t_print("myos.epitech.eu\n");
+    else if(!strcmp(inp,"date")||_sh_sw(inp,"date "))sh_date();
+    else if(!strcmp(inp,"time")||!strcmp(inp,"clock")){
+        char b[12];int o=0;
         b[o++]='0'+_rtc.h/10;b[o++]='0'+_rtc.h%10;b[o++]=':';
         b[o++]='0'+_rtc.m/10;b[o++]='0'+_rtc.m%10;b[o++]=':';
         b[o++]='0'+_rtc.s/10;b[o++]='0'+_rtc.s%10;b[o++]='\n';b[o]='\0';
         t_print(b);
     }
-    else if(!strcmp(inp,"whoami"))t_print("root\n");
-    else if(!strcmp(inp,"hostname"))t_print("myos.epitech.eu\n");
-    else if(!strcmp(inp,"uptime"))t_print("up 0 days, 0:00:00\n");
-    else if(!strcmp(inp,"ps")){
-        t_print("PID  STAT  CMD\n");
-        t_print("  1  S     init\n");
-        t_print("  2  S     kmain\n");
-        t_print("  3  S     myos-wm\n");
-        t_print("  4  R     terminal\n");
+    else if(!strcmp(inp,"uptime"))sh_uptime();
+    else if(!strcmp(inp,"ps")||_sh_sw(inp,"ps "))sh_ps();
+    else if(!strcmp(inp,"top"))sh_top();
+    else if(!strcmp(inp,"kill")||_sh_sw(inp,"kill ")||
+            !strcmp(inp,"killall")||_sh_sw(inp,"killall "))
+        {t_print("kill: ");t_print(arg[0]?arg:"?");t_print(": no such process\n");}
+    else if(!strcmp(inp,"nice")||_sh_sw(inp,"nice "))t_print("nice: ok\n");
+    else if(!strcmp(inp,"free")||_sh_sw(inp,"free "))sh_free();
+    else if(!strcmp(inp,"df")||_sh_sw(inp,"df "))sh_df();
+    else if(!strcmp(inp,"du")||_sh_sw(inp,"du "))
+        {t_print("0\t");t_print(arg[0]?arg:".");t_print("\n");}
+    else if(!strcmp(inp,"lscpu"))sh_lscpu();
+    else if(!strcmp(inp,"lspci"))sh_lspci();
+    else if(!strcmp(inp,"lsmod"))sh_lsmod();
+    else if(!strcmp(inp,"lsblk"))t_print("NAME  SIZE TYPE\nhda   1.4M disk\n");
+    else if(!strcmp(inp,"lsusb"))t_print("Bus 001 Device 001: UHCI Root Hub\n");
+    else if(!strcmp(inp,"dmesg"))sh_dmesg();
+    else if(!strcmp(inp,"mount"))t_print("/dev/hda on / type ext2\n");
+    else if(!strcmp(inp,"umount")||_sh_sw(inp,"umount "))t_print("umount: ok\n");
+    else if(!strcmp(inp,"sync")){}
+    else if(!strcmp(inp,"strace")||_sh_sw(inp,"strace "))t_print("strace: non supporte\n");
+    else if(!strcmp(inp,"ltrace")||_sh_sw(inp,"ltrace "))t_print("ltrace: non supporte\n");
+    else if(!strcmp(inp,"gdb")||_sh_sw(inp,"gdb "))t_print("gdb: non supporte en baremetal\n");
+    else if(!strcmp(inp,"valgrind")||_sh_sw(inp,"valgrind "))t_print("valgrind: non supporte\n");
+    else if(!strcmp(inp,"make")||_sh_sw(inp,"make "))t_print("make: Makefile introuvable\n");
+    else if(!strcmp(inp,"gcc")||_sh_sw(inp,"gcc "))t_print("gcc: pas de compilateur runtime\n");
+    else if(!strcmp(inp,"nasm")||_sh_sw(inp,"nasm "))t_print("nasm: pas d'assembleur runtime\n");
+    /* systeme avance */
+    else if(!strcmp(inp,"who"))sh_who();
+    else if(!strcmp(inp,"w"))sh_w();
+    else if(!strcmp(inp,"last")||!strcmp(inp,"lastlog"))sh_last();
+    else if(!strcmp(inp,"tty"))sh_tty();
+    else if(!strcmp(inp,"nproc"))sh_nproc();
+    else if(!strcmp(inp,"vmstat"))sh_vmstat();
+    else if(!strcmp(inp,"iostat"))sh_iostat();
+    else if(!strcmp(inp,"sysctl")||_sh_sw(inp,"sysctl "))sh_sysctl(arg);
+    else if(!strcmp(inp,"route")||!strcmp(inp,"netstat -r"))sh_route();
+    else if(!strcmp(inp,"arp")||!strcmp(inp,"arp -a"))sh_arp();
+    else if(!strcmp(inp,"iptables")||_sh_sw(inp,"iptables "))sh_iptables(arg);
+    else if(!strcmp(inp,"dmidecode")||_sh_sw(inp,"dmidecode "))sh_dmidecode();
+    else if(!strcmp(inp,"lshw"))sh_lshw();
+    else if(!strcmp(inp,"hdparm")||_sh_sw(inp,"hdparm "))sh_hdparm(arg);
+    else if(!strcmp(inp,"acpi"))sh_acpi();
+    else if(!strcmp(inp,"sensors"))sh_sensors();
+    else if(!strcmp(inp,"timedatectl")||_sh_sw(inp,"timedatectl "))sh_timedatectl();
+    else if(!strcmp(inp,"hwclock")||_sh_sw(inp,"hwclock "))sh_hwclock();
+    else if(!strcmp(inp,"locale")||!strcmp(inp,"localectl"))sh_locale();
+    else if(!strcmp(inp,"systemctl")||_sh_sw(inp,"systemctl "))sh_systemctl(arg);
+    else if(!strcmp(inp,"service")||_sh_sw(inp,"service "))sh_service(arg);
+    else if(!strcmp(inp,"journalctl")||_sh_sw(inp,"journalctl "))sh_journalctl();
+    /* processus avance */
+    else if(!strcmp(inp,"pstree"))sh_pstree();
+    else if(!strcmp(inp,"htop"))sh_top();
+    else if(!strcmp(inp,"pgrep")||_sh_sw(inp,"pgrep "))sh_pgrep(arg);
+    else if(!strcmp(inp,"pkill")||_sh_sw(inp,"pkill "))sh_pkill(arg);
+    else if(!strcmp(inp,"pidof")||_sh_sw(inp,"pidof "))sh_pidof(arg);
+    else if(!strcmp(inp,"taskset")||_sh_sw(inp,"taskset "))t_print("pid 10's current affinity list: 0\n");
+    else if(!strcmp(inp,"renice")||_sh_sw(inp,"renice "))sh_renice(arg);
+    else if(!strcmp(inp,"nohup")||_sh_sw(inp,"nohup "))
+        {t_print("nohup: '");t_print(arg[0]?arg:"?");t_print("' ignore les HUP\n");}
+    else if(!strcmp(inp,"jobs"))t_print("[1]+ Running   sh\n");
+    else if(!strcmp(inp,"bg")||_sh_sw(inp,"bg "))t_print("[1]+ Continued\n");
+    else if(!strcmp(inp,"fg")||_sh_sw(inp,"fg "))t_print("[1]+ Running\n");
+    /* texte avance */
+    else if(!strcmp(inp,"rev")||_sh_sw(inp,"rev "))sh_rev(arg);
+    else if(!strcmp(inp,"fold")||_sh_sw(inp,"fold "))sh_fold(arg);
+    else if(!strcmp(inp,"nl")||_sh_sw(inp,"nl "))sh_nl(arg);
+    else if(!strcmp(inp,"printf")||_sh_sw(inp,"printf "))sh_printf_cmd(arg);
+    else if(!strcmp(inp,"basename")||_sh_sw(inp,"basename "))sh_basename(arg);
+    else if(!strcmp(inp,"dirname")||_sh_sw(inp,"dirname "))sh_dirname_cmd(arg);
+    else if(!strcmp(inp,"xxd")||_sh_sw(inp,"xxd ")||
+            !strcmp(inp,"hexdump")||_sh_sw(inp,"hexdump "))sh_xxd(arg);
+    else if(!strcmp(inp,"od")||_sh_sw(inp,"od "))sh_od(arg);
+    else if(!strcmp(inp,"ascii"))sh_ascii_table();
+    else if(!strcmp(inp,"column")||_sh_sw(inp,"column "))sh_column(arg);
+    else if(!strcmp(inp,"fmt")||_sh_sw(inp,"fmt "))sh_fmt(arg);
+    else if(!strcmp(inp,"expand")||!strcmp(inp,"unexpand")||
+            _sh_sw(inp,"expand ")||_sh_sw(inp,"unexpand "))
+        {t_print(arg[0]?arg:"(stdin)");t_print("\n");}
+    else if(!strcmp(inp,"paste")||_sh_sw(inp,"paste "))
+        {t_print(arg[0]?arg:"(stdin)");t_print("\n");}
+    else if(!strcmp(inp,"iconv")||_sh_sw(inp,"iconv "))t_print("iconv: ok (simule)\n");
+    /* maths */
+    else if(!strcmp(inp,"factor")||_sh_sw(inp,"factor "))sh_factor(arg);
+    else if(!strcmp(inp,"primes")||_sh_sw(inp,"primes "))sh_primes(arg);
+    else if(!strcmp(inp,"expr")||_sh_sw(inp,"expr "))sh_expr(arg);
+    else if(!strcmp(inp,"bc")||_sh_sw(inp,"bc ")||
+            !strcmp(inp,"calc")||_sh_sw(inp,"calc "))sh_expr(arg);
+    else if(!strcmp(inp,"units")||_sh_sw(inp,"units "))sh_units(arg);
+    /* archives */
+    else if(!strcmp(inp,"tar")||_sh_sw(inp,"tar "))sh_tar(arg);
+    else if(!strcmp(inp,"gzip")||_sh_sw(inp,"gzip ")||
+            !strcmp(inp,"gunzip")||_sh_sw(inp,"gunzip "))sh_gzip(arg);
+    else if(!strcmp(inp,"bzip2")||_sh_sw(inp,"bzip2 ")||
+            !strcmp(inp,"bunzip2")||_sh_sw(inp,"bunzip2 "))
+        {t_print("bzip2: ");t_print(arg[0]?arg:"?");t_print(": simule\n");}
+    else if(!strcmp(inp,"xz")||_sh_sw(inp,"xz ")||
+            !strcmp(inp,"unxz")||_sh_sw(inp,"unxz "))
+        {t_print("xz: ");t_print(arg[0]?arg:"?");t_print(": simule\n");}
+    else if(!strcmp(inp,"zip")||_sh_sw(inp,"zip ")||
+            !strcmp(inp,"unzip")||_sh_sw(inp,"unzip "))sh_zip(arg);
+    else if(!strcmp(inp,"compress")||_sh_sw(inp,"compress "))
+        {t_print("compress: simule\n");}
+    /* outils binaires */
+    else if(!strcmp(inp,"objdump")||_sh_sw(inp,"objdump "))sh_objdump(arg);
+    else if(!strcmp(inp,"nm")||_sh_sw(inp,"nm "))sh_nm(arg);
+    else if(!strcmp(inp,"strings")||_sh_sw(inp,"strings "))sh_strings(arg);
+    else if(!strcmp(inp,"readelf")||_sh_sw(inp,"readelf "))sh_readelf(arg);
+    else if(!strcmp(inp,"size")||_sh_sw(inp,"size "))sh_size(arg);
+    else if(!strcmp(inp,"strip")||_sh_sw(inp,"strip "))
+        {t_print("strip: ");t_print(arg[0]?arg:"?");t_print(": ok\n");}
+    else if(!strcmp(inp,"ldd")||_sh_sw(inp,"ldd "))
+        {t_print(arg[0]?arg:"?");t_print(": statiquement lie (pas de deps)\n");}
+    else if(!strcmp(inp,"addr2line")||_sh_sw(inp,"addr2line "))
+        {t_print("??:0\n");}
+    /* reseau */
+    else if(!strcmp(inp,"ifconfig")||!strcmp(inp,"ifconfig -a"))sh_ifconfig();
+    else if(!strcmp(inp,"ip")||_sh_sw(inp,"ip "))sh_ip(arg);
+    else if(!strcmp(inp,"net"))sh_ifconfig();
+    else if(!strcmp(inp,"ping")||_sh_sw(inp,"ping "))sh_ping(arg);
+    else if(!strcmp(inp,"netstat")||!strcmp(inp,"ss"))sh_netstat();
+    else if(!strcmp(inp,"nslookup")||_sh_sw(inp,"nslookup "))sh_nslookup(arg);
+    else if(!strcmp(inp,"dig")||_sh_sw(inp,"dig "))sh_nslookup(arg);
+    else if(!strcmp(inp,"traceroute")||_sh_sw(inp,"traceroute "))sh_traceroute(arg);
+    else if(!strcmp(inp,"curl")||_sh_sw(inp,"curl ")||
+            !strcmp(inp,"wget")||_sh_sw(inp,"wget "))
+        t_print("(reseau HTTP non supporte ici)\n");
+    else if(!strcmp(inp,"ssh")||_sh_sw(inp,"ssh "))t_print("ssh: non supporte\n");
+    else if(!strcmp(inp,"ftp")||_sh_sw(inp,"ftp "))t_print("ftp: non supporte\n");
+    else if(!strcmp(inp,"host")||_sh_sw(inp,"host "))sh_host(arg);
+    else if(!strcmp(inp,"whois")||_sh_sw(inp,"whois "))sh_whois(arg);
+    else if(!strcmp(inp,"nc")||!strcmp(inp,"netcat")||
+            _sh_sw(inp,"nc ")||_sh_sw(inp,"netcat "))sh_nc(arg);
+    else if(!strcmp(inp,"tcpdump")||_sh_sw(inp,"tcpdump "))sh_tcpdump(arg);
+    else if(!strcmp(inp,"iwconfig")||_sh_sw(inp,"iwconfig "))
+        t_print("eth0: no wireless extensions\nlo: no wireless extensions\n");
+    else if(!strcmp(inp,"iw")||_sh_sw(inp,"iw "))t_print("iw: pas de carte WiFi\n");
+    else if(!strcmp(inp,"ethtool")||_sh_sw(inp,"ethtool "))sh_ethtool();
+    /* environnement */
+    else if(!strcmp(inp,"env"))sh_env();
+    else if(!strcmp(inp,"printenv")||_sh_sw(inp,"printenv "))sh_printenv(arg);
+    else if(_sh_sw(inp,"export "))t_print("export: ok\n");
+    else if(_sh_sw(inp,"unset "))t_print("unset: ok\n");
+    else if(!strcmp(inp,"which")||_sh_sw(inp,"which "))sh_which(arg);
+    else if(!strcmp(inp,"type")||_sh_sw(inp,"type "))sh_which(arg);
+    else if(!strcmp(inp,"alias")||_sh_sw(inp,"alias "))t_print("(aucun alias)\n");
+    /* utilisateurs */
+    else if(!strcmp(inp,"who"))sh_who();
+    else if(!strcmp(inp,"users"))t_print("root\n");
+    else if(!strcmp(inp,"logname"))t_print("root\n");
+    else if(!strcmp(inp,"useradd")||!strcmp(inp,"adduser")||
+            _sh_sw(inp,"useradd ")||_sh_sw(inp,"adduser "))sh_useradd(arg);
+    else if(!strcmp(inp,"userdel")||!strcmp(inp,"deluser")||
+            _sh_sw(inp,"userdel ")||_sh_sw(inp,"deluser "))
+        {t_print("userdel: ");t_print(arg[0]?arg:"?");t_print(": supprime (simule)\n");}
+    else if(!strcmp(inp,"usermod")||_sh_sw(inp,"usermod "))t_print("usermod: ok\n");
+    else if(!strcmp(inp,"groupadd")||_sh_sw(inp,"groupadd "))
+        {t_print("groupadd: ");t_print(arg[0]?arg:"?");t_print(": ok\n");}
+    else if(!strcmp(inp,"groupdel")||_sh_sw(inp,"groupdel "))t_print("groupdel: ok\n");
+    else if(!strcmp(inp,"groups"))sh_groups();
+    else if(!strcmp(inp,"finger")||_sh_sw(inp,"finger "))sh_finger(arg);
+    else if(!strcmp(inp,"chsh")||_sh_sw(inp,"chsh "))sh_chsh(arg);
+    else if(!strcmp(inp,"chfn")||_sh_sw(inp,"chfn "))t_print("chfn: ok (simule)\n");
+    else if(!strcmp(inp,"passwd")||_sh_sw(inp,"passwd "))sh_passwd_cmd();
+    else if(!strcmp(inp,"newgrp")||_sh_sw(inp,"newgrp "))t_print("newgrp: ok\n");
+    /* crypto/securite */
+    else if(!strcmp(inp,"openssl")||_sh_sw(inp,"openssl "))sh_openssl(arg);
+    else if(!strcmp(inp,"gpg")||_sh_sw(inp,"gpg "))sh_gpg(arg);
+    else if(!strcmp(inp,"ssh-keygen")||_sh_sw(inp,"ssh-keygen "))sh_ssh_keygen();
+    else if(!strcmp(inp,"md5sum")||_sh_sw(inp,"md5sum "))sh_md5sum(arg);
+    else if(!strcmp(inp,"sha256sum")||!strcmp(inp,"sha1sum")||
+            _sh_sw(inp,"sha256sum ")||_sh_sw(inp,"sha1sum "))sh_sha256sum(arg);
+    else if(!strcmp(inp,"base64")||_sh_sw(inp,"base64 "))sh_base64(arg);
+    else if(!strcmp(inp,"checksec")||_sh_sw(inp,"checksec "))sh_checksec(arg);
+    /* planification */
+    else if(!strcmp(inp,"crontab")||_sh_sw(inp,"crontab "))sh_crontab(arg);
+    else if(!strcmp(inp,"at")||_sh_sw(inp,"at "))sh_at(arg);
+    else if(!strcmp(inp,"batch"))t_print("batch: job 1 ajoute\n");
+    /* divers */
+    else if(!strcmp(inp,"wall")||_sh_sw(inp,"wall "))sh_wall(arg);
+    else if(!strcmp(inp,"write")||_sh_sw(inp,"write "))sh_wall(arg);
+    else if(!strcmp(inp,"mesg")||_sh_sw(inp,"mesg "))t_print("mesg: ok\n");
+    else if(!strcmp(inp,"watch")||_sh_sw(inp,"watch "))sh_watch(arg);
+    else if(!strcmp(inp,"script")||_sh_sw(inp,"script "))
+        t_print("Script started, file is typescript. Ctrl+D to stop.\n");
+    else if(!strcmp(inp,"screen")||!strcmp(inp,"tmux"))
+        t_print("screen/tmux: non supporte en baremetal\n");
+    else if(!strcmp(inp,"ulimit")||_sh_sw(inp,"ulimit "))
+        {t_print("open files  (-n) 1024\nstack size  (-s) 8192\ncpu time    (-t) unlimited\n");}
+    else if(!strcmp(inp,"wait")||_sh_sw(inp,"wait ")){}
+    else if(!strcmp(inp,"trap")||_sh_sw(inp,"trap "))t_print("trap: ok\n");
+    else if(!strcmp(inp,"read")||_sh_sw(inp,"read ")){}
+    else if(!strcmp(inp,"test")||_sh_sw(inp,"test ")||
+            (inp[0]=='['&&inp[1]==' '))t_print("0\n");
+    else if(!strcmp(inp,"source")||_sh_sw(inp,"source ")||
+            (inp[0]=='.'&&inp[1]==' '))t_print("source: ok\n");
+    else if(!strcmp(inp,"exec")||_sh_sw(inp,"exec "))t_print("exec: ok\n");
+    else if(!strcmp(inp,"eval")||_sh_sw(inp,"eval "))t_print("eval: ok\n");
+    else if(!strcmp(inp,"declare")||_sh_sw(inp,"declare "))t_print("declare: ok\n");
+    else if(!strcmp(inp,"set")||_sh_sw(inp,"set "))sh_env();
+    else if(!strcmp(inp,"readonly")||_sh_sw(inp,"readonly "))t_print("readonly: ok\n");
+    else if(!strcmp(inp,"dd")||_sh_sw(inp,"dd "))
+        {t_print("1+0 records in\n1+0 records out\n512 bytes copied\n");}
+    else if(!strcmp(inp,"mkfs")||_sh_sw(inp,"mkfs "))
+        {t_print("mkfs: ");t_print(arg[0]?arg:"?");t_print(": simule\n");}
+    else if(!strcmp(inp,"fsck")||_sh_sw(inp,"fsck "))
+        t_print("fsck: /dev/hda: prop: 0 erreur\n");
+    else if(!strcmp(inp,"blkid"))
+        t_print("/dev/hda: TYPE=\"ext2\" LABEL=\"myos\"\n");
+    else if(!strcmp(inp,"fdisk")||_sh_sw(inp,"fdisk "))
+        t_print("Disk /dev/hda: 1.4 MB, 2880 sectors\n");
+    else if(!strcmp(inp,"parted")||_sh_sw(inp,"parted "))
+        t_print("GNU Parted: /dev/hda 1.44MB ext2\n");
+    /* shell */
+    else if(!strcmp(inp,"history"))sh_history();
+    else if(!strcmp(inp,"man")||_sh_sw(inp,"man "))sh_man(arg);
+    else if(!strcmp(inp,"info")||_sh_sw(inp,"info "))sh_man(arg);
+    else if(!strcmp(inp,"help")||!strcmp(inp,"h")){
+        t_print("=== MyOS Shell - Commandes disponibles ===\n");
+        t_print(" FS      : ls ll cd pwd cat less mkdir touch\n");
+        t_print("           nano vi vim  (editeur de fichiers)\n");
+        t_print("           rm cp mv find stat file ln chmod\n");
+        t_print("           chown basename dirname realpath\n");
+        t_print("           tree blkid fdisk dd mkfs fsck\n");
+        t_print(" Texte   : echo grep head tail wc sort uniq\n");
+        t_print("           cut tr sed awk tee rev fold nl\n");
+        t_print("           printf column fmt paste expand\n");
+        t_print("           xxd hexdump od strings ascii\n");
+        t_print(" Systeme : uname arch date time uptime ps top\n");
+        t_print("           kill free df du lscpu lspci lsmod\n");
+        t_print("           dmesg mount lsblk lsusb who w last\n");
+        t_print("           tty nproc vmstat iostat sysctl\n");
+        t_print("           dmidecode lshw hdparm acpi sensors\n");
+        t_print("           timedatectl hwclock locale\n");
+        t_print("           systemctl service journalctl\n");
+        t_print(" Process : pstree htop pgrep pkill pidof\n");
+        t_print("           taskset renice nohup jobs bg fg\n");
+        t_print("           strace ltrace gdb valgrind\n");
+        t_print(" Reseau  : ifconfig ip ping netstat ss route\n");
+        t_print("           arp iptables nslookup dig host\n");
+        t_print("           traceroute whois nc tcpdump\n");
+        t_print("           ethtool iwconfig curl wget ssh ftp\n");
+        t_print(" Crypto  : md5sum sha256sum base64 openssl\n");
+        t_print("           gpg ssh-keygen checksec\n");
+        t_print(" Binaire : objdump nm readelf strings size\n");
+        t_print("           strip ldd addr2line\n");
+        t_print(" Users   : useradd userdel usermod groupadd\n");
+        t_print("           passwd groups finger chsh chfn\n");
+        t_print("           who users logname last\n");
+        t_print(" Archive : tar gzip bzip2 xz zip unzip\n");
+        t_print(" Math    : factor primes expr bc calc units\n");
+        t_print(" Env     : env printenv export unset which\n");
+        t_print("           set declare readonly source eval\n");
+        t_print("           alias man info type\n");
+        t_print(" Shell   : history clear cls about sudo su\n");
+        t_print("           crontab at batch watch wall write\n");
+        t_print("           script ulimit trap test jobs\n");
+        t_print(" Fun     : fortune cowsay banner figlet toilet\n");
+        t_print("           cal seq yes sleep color matrix\n");
+        t_print("           sl hack fire rain pipes nyan lolcat\n");
+        t_print("           creeper nyan cowsay\n");
+        t_print(" Autres  : reboot shutdown mem make gcc nasm\n");
+        t_print("           dd mkfs fdisk blkid parted fsck\n");
+        t_print("Type 'man <cmd>' pour l'aide d'une commande.\n");
     }
+    else if(!strcmp(inp,"snake")){win_open(W_SNAKE);snake_reset();}
+    else if(!strcmp(inp,"rtype")){win_open(W_RTYPE);rtype_reset();}
+    else if(!strcmp(inp,"pong")){win_open(W_PONG);pong_reset();}
+    else if(!strcmp(inp,"clear")||!strcmp(inp,"cls"))
+        {for(int i=0;i<T_ROWS;i++)_tlines[i][0]='\0';_tnlines=0;}
+    else if(!strcmp(inp,"about"))
+        {t_print("MyOS v0.1 Epitech | x86 32-bit | MineGRUB\n");}
+    else if(!strcmp(inp,"sudo")||_sh_sw(inp,"sudo "))t_print("root@myos OK\n");
+    else if(!strcmp(inp,"su")||_sh_sw(inp,"su "))t_print("root@myos:~#\n");
+    else if(!strcmp(inp,"bash")||!strcmp(inp,"sh")||!strcmp(inp,"zsh"))
+        t_print("MyOS Shell v1.0\n");
+    else if(!strcmp(inp,"exit")||!strcmp(inp,"logout"))t_print("(pas de session parente)\n");
+    else if(!strcmp(inp,"true")){}
+    else if(!strcmp(inp,"false"))t_print("false: exit status 1\n");
+    else if(!strcmp(inp,"yes")||_sh_sw(inp,"yes "))sh_yes(arg);
+    else if(!strcmp(inp,"seq")||_sh_sw(inp,"seq "))sh_seq(arg);
+    else if(!strcmp(inp,"cal")||!strcmp(inp,"ncal"))sh_cal();
+    else if(!strcmp(inp,"sleep")||_sh_sw(inp,"sleep "))sh_sleep(arg);
+    else if(!strcmp(inp,"fortune"))sh_fortune();
+    else if(!strcmp(inp,"cowsay")||_sh_sw(inp,"cowsay "))sh_cowsay(arg);
+    else if(!strcmp(inp,"banner")||_sh_sw(inp,"banner "))sh_banner(arg);
+    else if(_sh_sw(inp,"color "))sh_color(arg);
+    else if(!strcmp(inp,"matrix")||!strcmp(inp,"cmatrix"))
+        t_print("Wake up, Neo...\nThe Matrix has you.\nFollow the white rabbit.\n");
+    else if(!strcmp(inp,"creeper"))t_print("Creeper, Aw Man...\n");
+    else if(!strcmp(inp,"sl"))t_print("   o O O     \n   |___|     \n   |---|     \n");
+    else if(!strcmp(inp,"hack"))sh_hack();
+    else if(!strcmp(inp,"fire"))sh_fire();
+    else if(!strcmp(inp,"rain"))sh_rain();
+    else if(!strcmp(inp,"pipes"))sh_pipes();
+    else if(!strcmp(inp,"nyan"))sh_nyan();
+    else if(!strcmp(inp,"lolcat")||_sh_sw(inp,"lolcat "))sh_lolcat(arg);
+    else if(!strcmp(inp,"figlet")||_sh_sw(inp,"figlet "))sh_figlet(arg);
+    else if(!strcmp(inp,"toilet")||_sh_sw(inp,"toilet "))sh_toilet(arg);
     else if(!strcmp(inp,"mem")){
-        t_print("Heap base : 0x400000  size: 4MB\n");
-        t_print("Kernel    : 0x010000  size: ~66KB\n");
-        t_print("Backbuf   : 0x300000  size: 900KB\n");
-        t_print("VGA font  : 0x006000  size: 2KB\n");
+        t_print("Heap : 0x400000  4MB\n");
+        t_print("Kern : 0x010000 ~88KB\n");
+        t_print("BkBuf: 0x300000 900KB\n");
     }
-    else if(!strcmp(inp,"net")||!strcmp(inp,"ifconfig")){
-        if(net_ok){
-            t_print("eth0  UP\n");
-            t_print("  IP  : 10.0.2.15\n");
-            t_print("  GW  : 10.0.2.2\n");
-            t_print("  DNS : 10.0.2.3\n");
-            t_print("  NIC : RTL8139\n");
-        }else{
-            t_print("eth0  DOWN (reseau non disponible)\n");
-        }
-    }
+    else if(!strcmp(inp,"shutdown")||!strcmp(inp,"poweroff"))
+        {t_print("Arret du systeme...\n");cmd_reboot();}
+    else if(!strcmp(inp,"reboot")||!strcmp(inp,"halt"))
+        {t_print("Redemarrage...\n");cmd_reboot();}
+    else if(inp[0]=='#'){}
     else if(inp[0]){t_print(inp);t_print(": commande introuvable\n");}
     _tilen=0;_tinput[0]='\0';
 }
@@ -404,6 +1900,44 @@ static void draw_code_line(sfcml_Window* win,const char* line,int x,int y,sfcml_
 static char _word[WORD_ROWS][WORD_COLS+1];
 static int  _word_nl=1,_word_cl=0,_word_cc=0,_word_sc=0,_word_inited=0;
 
+/* Sauvegarde le contenu du word processor vers le VFS */
+static void _nano_save(void){
+    if(!_nano_path[0])return;
+    DVFSEntry* e=_dvfs_find(_nano_path);
+    if(!e)e=_dvfs_create(_nano_path,0);
+    if(!e)return;
+    int o=0;
+    for(int i=0;i<_word_nl&&o<DVFS_CLEN-2;i++){
+        int l=(int)strlen(_word[i]);
+        if(o+l+1>=DVFS_CLEN)break;
+        memcpy(e->content+o,_word[i],(size_t)l);o+=l;
+        if(i<_word_nl-1)e->content[o++]='\n';
+    }
+    e->content[o]='\0';
+}
+
+/* Ouvre nano avec un fichier du VFS */
+static void sh_nano(const char* a){
+    if(!a[0]){t_print("Usage: nano <fichier>\n");return;}
+    char fp[DVFS_PLEN];_dvfs_fullpath(a,fp,DVFS_PLEN);
+    DVFSEntry* e=_dvfs_create(fp,0);
+    strncpy(_nano_path,fp,DVFS_PLEN-1);_nano_path[DVFS_PLEN-1]='\0';
+    _word_nl=0;_word_cl=0;_word_cc=0;_word_sc=0;
+    if(e&&e->content[0]){
+        const char* c=e->content;
+        while(*c&&_word_nl<WORD_ROWS){
+            int li=0;
+            while(*c&&*c!='\n'&&li<WORD_COLS)_word[_word_nl][li++]=*c++;
+            _word[_word_nl][li]='\0';_word_nl++;
+            if(*c=='\n')c++;
+        }
+    }
+    if(_word_nl==0){_word[0][0]='\0';_word_nl=1;}
+    _word_inited=1;
+    win_open(W_WORD);
+    t_print("nano: ");t_print(fp);t_print(" (Echap pour fermer)\n");
+}
+
 static void word_init(void){
     const char* t[]={
         "     Rapport - Epitech Technology",
@@ -443,6 +1977,7 @@ static void word_key(sfcml_KeyCode k){
             cur[_word_cc]='\0';_word_cl++;_word_cc=0;_word_nl++;
             if(_word_cl>=_word_sc+38)_word_sc++;
         }
+        _nano_save();
         break;
     case SFCML_KEY_BACKSPACE:
         if(_word_cc>0){memmove(cur+_word_cc-1,cur+_word_cc,len-_word_cc+1);_word_cc--;}
@@ -453,6 +1988,7 @@ static void word_key(sfcml_KeyCode k){
             _word_nl--;_word_cl--;_word_cc=pl;
             if(_word_cl<_word_sc)_word_sc=_word_cl;
         }
+        _nano_save();
         break;
     default:break;
     }
@@ -463,6 +1999,7 @@ static void word_text(char ch){
     if(len>=WORD_COLS)return;
     memmove(cur+_word_cc+1,cur+_word_cc,len-_word_cc+1);
     cur[_word_cc++]=ch;
+    _nano_save();
 }
 
 /* ============================================================
@@ -474,31 +2011,36 @@ static void word_text(char ch){
 
 typedef struct{int x,y,w,h,visible,minimized;const char* title;}AppWin;
 
-#define NW         10
+#define NW         14
 #define W_TERM     0
 #define W_ABOUT    1
 #define W_CREEP    2
 #define W_PAINT    3
 #define W_CODE     4
-#define W_WORD     5
+/* W_WORD already defined near top */
 #define W_SETTINGS 6
 #define W_BROWSER  7
 #define W_CALC     8
 #define W_FILES    9
+#define W_NETMGR   10
 
 static AppWin _wins[NW]={
     {70, 36, 504,320,0,0,"Terminal - root@myos"},
     {160,80, 320,210,0,0,"A propos de MyOS"},
     {240,70, 216,224,0,0,"Creeper!"},
-    {1,  1,  638,447,0,0,"Epitech Paint"},
-    {1,  1,  638,447,0,0,"Epitech Code Editor"},
-    {1,  1,  638,447,0,0,"Epitech Word"},
-    {40, 20, 560,410,0,0,"Parametres"},
-    {45, 0,  595,449,0,0,"MyBrowser"},
+    {1,  1,  SCR_W-2,SCR_H-33,0,0,"Epitech Paint"},
+    {1,  1,  SCR_W-2,SCR_H-33,0,0,"Epitech Code Editor"},
+    {1,  1,  SCR_W-2,SCR_H-33,0,0,"Epitech Word"},
+    {40, 20, SCR_W-80,SCR_H-70,0,0,"Parametres"},
+    {1,  0,  SCR_W-2,SCR_H-31,0,0,"MyBrowser"},
     {190,60, 240,300,0,0,"Calculatrice"},
     {50, 20, 540,400,0,0,"Gestionnaire de fichiers"},
+    {30, 25, 580,395,0,0,"Reseau - MyOS"},
+    {80, 50, 660,490,0,0,"Snake"},
+    {1,  1,  SCR_W-2,SCR_H-33,0,0,"R-Type"},
+    {150,50, 500,430,0,0,"Pong"},
 };
-static int _z[NW]={0,1,2,3,4,5,6,7,8,9};
+static int _z[NW]={0,1,2,3,4,5,6,7,8,9,10,11,12,13};
 static int _drag_win=-1,_drag_ox,_drag_oy;
 static int _focus=-1;
 
@@ -566,6 +2108,7 @@ static char   _calc_op=0;
 static int    _calc_new=1;
 static int    _calc_err=0;
 
+static int _netmgr_ping_ok=-1; /* -1=non teste 0=echec 1=ok */
 static int _fi_sel=0,_fi_dir=0;
 static int   _fi_edit=0;
 #define FI_ER 20
@@ -650,9 +2193,9 @@ static void _burl_nav(void){
     _bpage=0;
 }
 
-#define NICONS 9
-static const int   IC_Y[NICONS]={8,58,108,158,208,258,308,358,408};
-static const char* IC_LBL[NICONS]={"Terminal","Paint","Code","Word","Creeper","A propos","Reboot","Params","Browser"};
+#define NICONS 12
+static const int   IC_Y[NICONS]={8,53,98,143,188,233,278,323,368,413,458,503};
+static const char* IC_LBL[NICONS]={"Terminal","Paint","Code","Word","Creeper","A propos","Reboot","Params","Browser","Snake","R-Type","Pong"};
 #define IC_X  6
 #define IC_SZ 32
 
@@ -913,7 +2456,7 @@ static void draw_word(sfcml_Window* win,int wi){
     /* Toolbar */
     sfcml_fillRect(win,sfcml_rect(sx,sy,sw,WORD_TB),tbg);
     sfcml_drawHLine(win,sx,sy+WORD_TB-1,sw,rd);
-    sfcml_drawText(win,"Epitech Word",sx+6,sy+10,rd,tbg);
+    sfcml_drawText(win,_nano_path[0]?_nano_path:"Epitech Word",sx+6,sy+10,rd,tbg);
     /* Format buttons */
     struct{const char* l;int x;}fbtns[]={{"B",sx+130},{"I",sx+152},{"U",sx+174},{"|",sx+196},{"Enreg.",sx+208},{"Imprimer",sx+280}};
     sfcml_Color btn_c[6]={sfcml_rgb(50,50,80),sfcml_rgb(50,50,80),sfcml_rgb(50,50,80),sfcml_rgb(40,40,55),sfcml_rgb(20,70,20),sfcml_rgb(20,20,70)};
@@ -1041,14 +2584,14 @@ static void draw_icons(sfcml_Window* win){
  * ============================================================ */
 #define SM_W   172
 #define SM_IH   22
-#define SM_N    13
+#define SM_N    14
 #define SM_H   (SM_N*SM_IH+8)
-#define SM_Y   (450-SM_H)
+#define SM_Y   (TB_Y-SM_H)
 
 static const char* SM_LBL[SM_N]={
     "  Terminal","  Creeper!","  A propos","  ---------",
     "  Paint","  Code Editor","  Word","  Navigateur",
-    "  Calculatrice","  Fichiers","  Parametres",
+    "  Calculatrice","  Fichiers","  Reseau","  Parametres",
     "  ---------","  Redemarrer",
 };
 
@@ -1082,8 +2625,9 @@ static void smenu_click(int mx,int my){
     else if(item==7){win_open(W_BROWSER);_bnav(0);}
     else if(item==8)win_open(W_CALC);
     else if(item==9)win_open(W_FILES);
-    else if(item==10)win_open(W_SETTINGS);
-    else if(item==12)cmd_reboot();
+    else if(item==10)win_open(W_NETMGR);
+    else if(item==11)win_open(W_SETTINGS);
+    else if(item==13)cmd_reboot();
 }
 
 /* ============================================================
@@ -1098,8 +2642,8 @@ static const char* RC_LBL[RC_N]={
 static void draw_rcmenu(sfcml_Window* win){
     int mh=RC_N*RC_IH+4;
     int x0=_rcx,y0=_rcy;
-    if(x0+RC_W>640)x0=640-RC_W;
-    if(y0+mh>450)y0=450-mh;
+    if(x0+RC_W>SCR_W)x0=SCR_W-RC_W;
+    if(y0+mh>TB_Y)y0=TB_Y-mh;
     sfcml_fillRect(win,sfcml_rect(x0,y0,RC_W,mh),sfcml_rgb(38,38,52));
     sfcml_drawRect(win,sfcml_rect(x0,y0,RC_W,mh),sfcml_rgb(100,100,130));
     for(int i=0;i<RC_N;i++){
@@ -1114,8 +2658,8 @@ static void draw_rcmenu(sfcml_Window* win){
 static void rcmenu_click(int mx,int my){
     int mh=RC_N*RC_IH+4;
     int x0=_rcx,y0=_rcy;
-    if(x0+RC_W>640)x0=640-RC_W;
-    if(y0+mh>450)y0=450-mh;
+    if(x0+RC_W>SCR_W)x0=SCR_W-RC_W;
+    if(y0+mh>TB_Y)y0=TB_Y-mh;
     _rcopen=0;
     if(mx<x0||mx>=x0+RC_W||my<y0||my>=y0+mh)return;
     int item=(my-y0-2)/RC_IH;
@@ -1141,39 +2685,39 @@ static void draw_taskbar(sfcml_Window* win){
             (uint8_t)((int)C_TB.r*(100-t*30/100)/100),
             (uint8_t)((int)C_TB.g*(100-t*30/100)/100),
             (uint8_t)((int)C_TB.b*(100-t*30/100)/100));
-        sfcml_drawHLine(win,0,449+i,640,gc);
+        sfcml_drawHLine(win,0,TB_Y+i,SCR_W,gc);
     }
-    sfcml_drawHLine(win,0,449,640,sfcml_rgb(0,90,170));
+    sfcml_drawHLine(win,0,TB_Y,SCR_W,sfcml_rgb(0,90,170));
     sfcml_Color sc=_start_open?sfcml_rgb(160,5,5):sfcml_rgb(215,20,20);
-    sfcml_fillRect(win,sfcml_rect(2,451,84,26),sc);
-    sfcml_drawRect(win,sfcml_rect(2,451,84,26),sfcml_rgb(120,4,4));
-    sfcml_fillRect(win,sfcml_rect(6,455,7,7),sfcml_rgb(255,80,80));
-    sfcml_fillRect(win,sfcml_rect(15,455,7,7),sfcml_rgb(80,200,80));
-    sfcml_fillRect(win,sfcml_rect(6,464,7,7),sfcml_rgb(80,80,255));
-    sfcml_fillRect(win,sfcml_rect(15,464,7,7),sfcml_rgb(255,200,0));
-    sfcml_drawText(win,"Start",26,460,SFCML_WHITE,sc);
+    sfcml_fillRect(win,sfcml_rect(2,TB_Y+2,84,26),sc);
+    sfcml_drawRect(win,sfcml_rect(2,TB_Y+2,84,26),sfcml_rgb(120,4,4));
+    sfcml_fillRect(win,sfcml_rect(6,TB_Y+6,7,7),sfcml_rgb(255,80,80));
+    sfcml_fillRect(win,sfcml_rect(15,TB_Y+6,7,7),sfcml_rgb(80,200,80));
+    sfcml_fillRect(win,sfcml_rect(6,TB_Y+15,7,7),sfcml_rgb(80,80,255));
+    sfcml_fillRect(win,sfcml_rect(15,TB_Y+15,7,7),sfcml_rgb(255,200,0));
+    sfcml_drawText(win,"Start",26,TB_Y+11,SFCML_WHITE,sc);
     int bx=88;
     for(int i=0;i<NW;i++){
         if(!_wins[i].visible)continue;
         int foc=(_focus==i);
         sfcml_Color bc=_wins[i].minimized?sfcml_rgb(50,50,68):(foc?sfcml_rgb(0,100,200):sfcml_rgb(38,38,58));
-        sfcml_fillRect(win,sfcml_rect(bx,452,TB_BW,24),bc);
-        sfcml_drawRect(win,sfcml_rect(bx,452,TB_BW,24),sfcml_rgb(80,80,110));
-        if(foc)sfcml_drawHLine(win,bx,452,TB_BW,sfcml_rgb(100,180,255));
+        sfcml_fillRect(win,sfcml_rect(bx,TB_Y+3,TB_BW,24),bc);
+        sfcml_drawRect(win,sfcml_rect(bx,TB_Y+3,TB_BW,24),sfcml_rgb(80,80,110));
+        if(foc)sfcml_drawHLine(win,bx,TB_Y+3,TB_BW,sfcml_rgb(100,180,255));
         sfcml_Color tc=_wins[i].minimized?sfcml_rgb(140,140,160):SFCML_WHITE;
-        sfcml_drawText(win,_wins[i].title,bx+4,460,tc,bc);
+        sfcml_drawText(win,_wins[i].title,bx+4,TB_Y+11,tc,bc);
         bx+=TB_BW+2;
     }
-    int tx=480;
+    int tx=SCR_W-160;
     sfcml_Color nicol=net_ok?sfcml_rgb(80,200,80):sfcml_rgb(160,160,160);
-    sfcml_fillRect(win,sfcml_rect(tx,455,18,16),C_TB);
-    sfcml_fillRect(win,sfcml_rect(tx+2,464,14,4),nicol);
-    sfcml_fillRect(win,sfcml_rect(tx+5,459,8,6),nicol);
-    sfcml_fillRect(win,sfcml_rect(tx+8,455,2,5),nicol);
+    sfcml_fillRect(win,sfcml_rect(tx,TB_Y+6,18,16),C_TB);
+    sfcml_fillRect(win,sfcml_rect(tx+2,TB_Y+15,14,4),nicol);
+    sfcml_fillRect(win,sfcml_rect(tx+5,TB_Y+10,8,6),nicol);
+    sfcml_fillRect(win,sfcml_rect(tx+8,TB_Y+6,2,5),nicol);
     tx+=22;
-    sfcml_fillRect(win,sfcml_rect(tx,457,6,12),C_TB);
-    sfcml_fillRect(win,sfcml_rect(tx,461,4,4),sfcml_rgb(180,180,200));
-    sfcml_fillTriangle(win,tx+4,457,tx+4,469,tx+10,463,sfcml_rgb(180,180,200));
+    sfcml_fillRect(win,sfcml_rect(tx,TB_Y+8,6,12),C_TB);
+    sfcml_fillRect(win,sfcml_rect(tx,TB_Y+12,4,4),sfcml_rgb(180,180,200));
+    sfcml_fillTriangle(win,tx+4,TB_Y+8,tx+4,TB_Y+20,tx+10,TB_Y+14,sfcml_rgb(180,180,200));
     tx+=18;
     char clk[9];
     clk[0]='0'+_rtc.h/10;clk[1]='0'+_rtc.h%10;clk[2]=':';
@@ -1184,8 +2728,8 @@ static void draw_taskbar(sfcml_Window* win){
     dat[3]='0'+_rtc.mon/10;dat[4]='0'+_rtc.mon%10;dat[5]='/';
     dat[6]='0'+(_rtc.year/1000)%10;dat[7]='0'+(_rtc.year/100)%10;
     dat[8]='0'+(_rtc.year/10)%10;dat[9]='0'+_rtc.year%10;dat[10]='\0';
-    sfcml_drawText(win,dat,tx+4,453,sfcml_rgb(180,180,210),C_TB);
-    sfcml_drawText(win,clk,tx+8,463,SFCML_WHITE,C_TB);
+    sfcml_drawText(win,dat,tx+4,TB_Y+4,sfcml_rgb(180,180,210),C_TB);
+    sfcml_drawText(win,clk,tx+8,TB_Y+14,SFCML_WHITE,C_TB);
 }
 
 /* ============================================================
@@ -1469,15 +3013,15 @@ static int _icos(int a){return _isin(a+90);}
 /* ============================================================
  * SS0 - Horloge flottante
  * ============================================================ */
-static int _clk_x=220,_clk_y=170,_clk_vx=1,_clk_vy=1;
+static int _clk_x=260,_clk_y=200,_clk_vx=1,_clk_vy=1;
 static void draw_ss_clock(sfcml_Window*win){
-    sfcml_fillRect(win,sfcml_rect(0,0,640,480),SFCML_BLACK);
+    sfcml_fillRect(win,sfcml_rect(0,0,SCR_W,SCR_H),SFCML_BLACK);
     char hm[6];
     hm[0]='0'+_rtc.h/10;hm[1]='0'+_rtc.h%10;hm[2]=':';
     hm[3]='0'+_rtc.m/10;hm[4]='0'+_rtc.m%10;hm[5]='\0';
     _clk_x+=_clk_vx;_clk_y+=_clk_vy;
-    if(_clk_x<0||_clk_x>440)_clk_vx=-_clk_vx; /* 200px wide=5chars*8*5 */
-    if(_clk_y<0||_clk_y>440)_clk_vy=-_clk_vy;
+    if(_clk_x<0||_clk_x>SCR_W-200)_clk_vx=-_clk_vx; /* 200px wide=5chars*8*5 */
+    if(_clk_y<0||_clk_y>SCR_H-40)_clk_vy=-_clk_vy;
     draw_big_text(win,hm,_clk_x,_clk_y,5,sfcml_rgb(0,140,255),SFCML_BLACK);
     char ss[3];ss[0]='0'+_rtc.s/10;ss[1]='0'+_rtc.s%10;ss[2]='\0';
     draw_big_text(win,ss,_clk_x+78,_clk_y+48,3,sfcml_rgb(20,70,160),SFCML_BLACK);
@@ -1498,8 +3042,8 @@ static void _branch(sfcml_Window*win,int x,int y,int ang,int len,int dep){
     if(dep==0||len<3)return;
     int x2=x+_icos(ang)*len/100;
     int y2=y-_isin(ang)*len/100;
-    if(x2<0)x2=0;if(x2>639)x2=639;
-    if(y2<0)y2=0;if(y2>479)y2=479;
+    if(x2<0)x2=0;if(x2>SCR_W-1)x2=SCR_W-1;
+    if(y2<0)y2=0;if(y2>SCR_H-1)y2=SCR_H-1;
     sfcml_Color c;
     if(dep>=6)      c=sfcml_rgb((uint8_t)(140-(8-dep)*15),60,15);
     else if(dep>=3) c=sfcml_rgb(20,(uint8_t)(60+dep*25),15);
@@ -1510,34 +3054,34 @@ static void _branch(sfcml_Window*win,int x,int y,int ang,int len,int dep){
     _branch(win,x2,y2,ang+sp,len*66/100,dep-1);
 }
 static void draw_ss_tree(sfcml_Window*win){
-    sfcml_fillRect(win,sfcml_rect(0,0,640,480),sfcml_rgb(0,4,2));
-    sfcml_fillRect(win,sfcml_rect(0,458,640,22),sfcml_rgb(5,18,5));
+    sfcml_fillRect(win,sfcml_rect(0,0,SCR_W,SCR_H),sfcml_rgb(0,4,2));
+    sfcml_fillRect(win,sfcml_rect(0,SCR_H-22,SCR_W,22),sfcml_rgb(5,18,5));
     _tree_t=(_tree_t+1)%360;
-    _branch(win,320,458,90,78,8); /* 8 niveaux de recursion */
+    _branch(win,SCR_W/2,SCR_H-22,90,78,8); /* 8 niveaux de recursion */
     sfcml_present(win);
 }
 
 /* ============================================================
  * SS2 - Mandelbrot (rendu progressif + zoom)
  * ============================================================ */
-static float _mb_cx=-0.5f,_mb_cy=0.0f,_mb_sc=3.5f/480.0f;
+static float _mb_cx=-0.5f,_mb_cy=0.0f,_mb_sc=3.5f/SCR_H;
 static int   _mb_zc=0;
 static void draw_ss_mandelbrot(sfcml_Window*win){
-    if(_mb_row>=480){
+    if(_mb_row>=SCR_H){
         /* Zoom vers l'elephant valley: (-0.7436, 0.1319) */
         _mb_cx=_mb_cx*0.85f+(-0.7436f)*0.15f;
         _mb_cy=_mb_cy*0.85f+( 0.1319f)*0.15f;
         _mb_sc*=0.78f;
         _mb_zc++;
-        if(_mb_zc>18){_mb_cx=-0.5f;_mb_cy=0.0f;_mb_sc=3.5f/480.0f;_mb_zc=0;}
+        if(_mb_zc>18){_mb_cx=-0.5f;_mb_cy=0.0f;_mb_sc=3.5f/SCR_H;_mb_zc=0;}
         _mb_row=0;
     }
     /* Rend 24 lignes par appel */
-    int rend=_mb_row+24; if(rend>480)rend=480;
+    int rend=_mb_row+24; if(rend>SCR_H)rend=SCR_H;
     for(int row=_mb_row;row<rend;row++){
-        for(int col=0;col<640;col++){
-            float x0=_mb_cx+(col-320)*_mb_sc;
-            float y0=_mb_cy+(row-240)*_mb_sc;
+        for(int col=0;col<SCR_W;col++){
+            float x0=_mb_cx+(col-SCR_W/2)*_mb_sc;
+            float y0=_mb_cy+(row-SCR_H/2)*_mb_sc;
             float x=0.0f,y=0.0f;
             int it=0;
             while(x*x+y*y<=4.0f&&it<48){
@@ -1568,18 +3112,18 @@ static uint8_t _ssz[SS_STARS];
 static uint32_t _ss_rng=12345;
 static uint32_t ss_rand(void){_ss_rng=_ss_rng*1664525+1013904223;return _ss_rng;}
 static void _star_rst(int i){
-    _ssx[i]=(int16_t)((ss_rand()%640)-320);
-    _ssy[i]=(int16_t)((ss_rand()%480)-240);
+    _ssx[i]=(int16_t)((ss_rand()%SCR_W)-(SCR_W/2));
+    _ssy[i]=(int16_t)((ss_rand()%SCR_H)-(SCR_H/2));
     _ssz[i]=(uint8_t)(180+ss_rand()%75);
 }
 static void draw_ss_stars(sfcml_Window*win){
-    sfcml_fillRect(win,sfcml_rect(0,0,640,480),SFCML_BLACK);
+    sfcml_fillRect(win,sfcml_rect(0,0,SCR_W,SCR_H),SFCML_BLACK);
     if(!_ss_si){for(int i=0;i<SS_STARS;i++)_star_rst(i);_ss_si=1;}
     for(int i=0;i<SS_STARS;i++){
         if(_ssz[i]<=2){_star_rst(i);continue;}
-        int sx=_ssx[i]*200/_ssz[i]+320;
-        int sy=_ssy[i]*200/_ssz[i]+240;
-        if(sx<0||sx>=640||sy<0||sy>=480){_star_rst(i);continue;}
+        int sx=_ssx[i]*200/_ssz[i]+SCR_W/2;
+        int sy=_ssy[i]*200/_ssz[i]+SCR_H/2;
+        if(sx<0||sx>=SCR_W||sy<0||sy>=SCR_H){_star_rst(i);continue;}
         uint8_t br=(uint8_t)(255-_ssz[i]);
         uint8_t sz=(uint8_t)(3-_ssz[i]/90); if(sz<1)sz=1;
         sfcml_fillRect(win,sfcml_rect(sx,sy,(int)sz,(int)sz),sfcml_rgb(br,br,br));
@@ -1598,12 +3142,12 @@ static uint32_t mc_rand(void){_mc_rng=_mc_rng*1664525+1013904223;return _mc_rng;
 static void draw_ss_matrix(sfcml_Window*win){
     if(!_mc_i){
         for(int i=0;i<SS_MC;i++){
-            _mcy[i]=(uint8_t)(mc_rand()%60);
+            _mcy[i]=(uint8_t)(mc_rand()%(SCR_H/8));
             _mcs[i]=(uint8_t)(1+mc_rand()%4);
             _mcf[i]=0;
         }
         _mc_i=1;
-        sfcml_fillRect(win,sfcml_rect(0,0,640,480),SFCML_BLACK);
+        sfcml_fillRect(win,sfcml_rect(0,0,SCR_W,SCR_H),SFCML_BLACK);
     }
     /* Fondu progressif de tous les pixels vers le noir */
     uint8_t*b=win->back;
@@ -1613,12 +3157,12 @@ static void draw_ss_matrix(sfcml_Window*win){
     for(int c=0;c<SS_MC;c++){
         _mcf[c]++;if(_mcf[c]<_mcs[c])continue;_mcf[c]=0;
         int x=c*8,y=(int)_mcy[c]*8;
-        if(y<480){
+        if(y<SCR_H){
             char ch=(char)(33+mc_rand()%94);
             sfcml_Color fg=(_mcy[c]%20<2)?sfcml_rgb(200,255,200):sfcml_rgb(0,180,0);
             sfcml_drawChar(win,ch,x,y,fg,SFCML_BLACK);
         }
-        _mcy[c]++;if(_mcy[c]>=60)_mcy[c]=0;
+        _mcy[c]++;if(_mcy[c]>=(uint8_t)(SCR_H/8))_mcy[c]=0;
     }
     sfcml_present(win);
 }
@@ -2254,18 +3798,155 @@ static void browser_click(int mx,int my){
 }
 
 /* ============================================================
+ * Gestionnaire reseau
+ * ============================================================ */
+static void _ip4str(uint32_t ip,char*buf){
+    int o=0;
+    for(int i=3;i>=0;i--){
+        uint8_t v=(uint8_t)(ip>>(i*8));
+        if(v>=100){buf[o++]='0'+v/100;}
+        if(v>=10) {buf[o++]='0'+(v/10)%10;}
+        buf[o++]='0'+v%10;
+        if(i>0)buf[o++]='.';
+    }
+    buf[o]='\0';
+}
+static void _mac6str(const uint8_t*mac,char*buf){
+    static const char*hx="0123456789ABCDEF";
+    int o=0;
+    for(int i=0;i<6;i++){buf[o++]=hx[mac[i]>>4];buf[o++]=hx[mac[i]&0xF];if(i<5)buf[o++]=':';}
+    buf[o]='\0';
+}
+
+static void draw_netmgr(sfcml_Window*win,int wi){
+    AppWin*w=&_wins[wi];
+    int sx=w->x+1,sy=w->y+TBAR_H,sw=w->w-2,sh=w->h-TBAR_H-1;
+    sfcml_Color bg=sfcml_rgb(240,242,245);
+    sfcml_Color hbg=sfcml_rgb(220,225,235);
+    sfcml_Color cardbg=sfcml_rgb(255,255,255);
+    sfcml_Color sep=sfcml_rgb(200,205,215);
+    sfcml_Color lbl=sfcml_rgb(80,85,100);
+    sfcml_Color val=sfcml_rgb(20,20,30);
+    sfcml_Color rbg=sfcml_rgb(230,235,240);
+    sfcml_fillRect(win,sfcml_rect(sx,sy,sw,sh),bg);
+    /* Header */
+    sfcml_fillRect(win,sfcml_rect(sx,sy,sw,24),hbg);
+    sfcml_drawHLine(win,sx,sy+23,sw,sep);
+    sfcml_drawText(win,"Centre Reseau et partage",sx+10,sy+8,sfcml_rgb(20,20,120),hbg);
+    /* Connection card */
+    int cy=sy+28;
+    sfcml_fillRect(win,sfcml_rect(sx+6,cy,sw-12,64),cardbg);
+    sfcml_drawRect(win,sfcml_rect(sx+6,cy,sw-12,64),sep);
+    /* Network icon (stylized) */
+    int ix=sx+18,iy=cy+12;
+    sfcml_fillRect(win,sfcml_rect(ix,iy+28,38,10),net_ok?sfcml_rgb(0,160,0):sfcml_rgb(180,30,30));
+    sfcml_fillRect(win,sfcml_rect(ix+10,iy+16,18,13),net_ok?sfcml_rgb(0,160,0):sfcml_rgb(180,30,30));
+    sfcml_fillRect(win,sfcml_rect(ix+17,iy+6,4,11),net_ok?sfcml_rgb(0,140,0):sfcml_rgb(160,20,20));
+    sfcml_drawRect(win,sfcml_rect(ix,iy+28,38,10),sfcml_rgb(100,100,120));
+    sfcml_drawRect(win,sfcml_rect(ix+10,iy+16,18,13),sfcml_rgb(100,100,120));
+    /* Card text */
+    int tx=sx+66;
+    sfcml_drawText(win,"Ethernet",tx,cy+8,sfcml_rgb(0,0,180),cardbg);
+    sfcml_Color stc=net_ok?sfcml_rgb(0,140,0):sfcml_rgb(180,20,20);
+    const char*stlbl=net_ok?"Connecte":"Non connecte";
+    sfcml_fillRect(win,sfcml_rect(tx,cy+22,8,8),stc);
+    sfcml_drawText(win,stlbl,tx+12,cy+22,stc,cardbg);
+    sfcml_drawText(win,"Carte reseau: RTL8139",tx,cy+38,lbl,cardbg);
+    sfcml_drawText(win,"Interface: eth0",tx,cy+50,lbl,cardbg);
+    /* Divider */
+    cy+=68;
+    sfcml_drawHLine(win,sx+6,cy,sw-12,sep);
+    cy+=8;
+    /* IP info rows */
+    char ipb[16],gwb[16],dnsb[16],macb[18],mskb[16];
+    _ip4str(net_my_ip, ipb);
+    _ip4str(net_gw_ip, gwb);
+    _ip4str(net_dns_ip,dnsb);
+    _ip4str(net_netmask,mskb);
+    _mac6str(net_mac,  macb);
+    const char*kk[5]={"Adresse IPv4 :","Masque :","Passerelle :","DNS :","MAC :"};
+    const char*vv[5]={ipb,mskb,gwb,dnsb,macb};
+    for(int i=0;i<5;i++){
+        int ry=cy+i*20;
+        sfcml_Color rb2=(i%2)?rbg:bg;
+        sfcml_fillRect(win,sfcml_rect(sx+6,ry,sw-12,19),rb2);
+        sfcml_drawText(win,kk[i],sx+14,ry+6,lbl,rb2);
+        sfcml_drawText(win,vv[i],sx+160,ry+6,val,rb2);
+    }
+    cy+=5*20+6;
+    /* DHCP row */
+    sfcml_fillRect(win,sfcml_rect(sx+6,cy,sw-12,20),cardbg);
+    sfcml_drawRect(win,sfcml_rect(sx+6,cy,sw-12,20),sep);
+    sfcml_drawText(win,"DHCP :",sx+14,cy+6,lbl,cardbg);
+    sfcml_Color dhcpc=net_dhcp_ok?sfcml_rgb(0,120,0):sfcml_rgb(120,80,0);
+    sfcml_drawText(win,net_dhcp_ok?"Actif (configuration automatique)":"Manuel (adresse statique)",sx+160,cy+6,dhcpc,cardbg);
+    cy+=24;
+    sfcml_drawHLine(win,sx+6,cy,sw-12,sep);
+    cy+=8;
+    /* Action buttons */
+    sfcml_Color btn1=sfcml_rgb(0,100,200),btn2=sfcml_rgb(0,130,60);
+    sfcml_Color btnd=sfcml_rgb(130,130,150);
+    sfcml_fillRect(win,sfcml_rect(sx+8,cy,160,28),net_ok?btn1:btnd);
+    sfcml_drawRect(win,sfcml_rect(sx+8,cy,160,28),sfcml_rgb(0,60,140));
+    sfcml_drawText(win,"Actualiser DHCP",sx+20,cy+10,SFCML_WHITE,net_ok?btn1:btnd);
+    sfcml_fillRect(win,sfcml_rect(sx+178,cy,160,28),net_ok?btn2:btnd);
+    sfcml_drawRect(win,sfcml_rect(sx+178,cy,160,28),sfcml_rgb(0,80,30));
+    sfcml_drawText(win,"Ping passerelle",sx+190,cy+10,SFCML_WHITE,net_ok?btn2:btnd);
+    cy+=36;
+    sfcml_drawHLine(win,sx+6,cy,sw-12,sep);
+    cy+=8;
+    /* Diagnostics */
+    sfcml_drawText(win,"Diagnostics",sx+14,cy,sfcml_rgb(60,60,80),bg);
+    cy+=14;
+    sfcml_drawHLine(win,sx+14,cy,80,sfcml_rgb(180,185,195));
+    cy+=8;
+    sfcml_Color diagbg=sfcml_rgb(248,249,252);
+    sfcml_fillRect(win,sfcml_rect(sx+6,cy,sw-12,sh-(cy-sy)-2),diagbg);
+    sfcml_drawRect(win,sfcml_rect(sx+6,cy,sw-12,sh-(cy-sy)-2),sep);
+    sfcml_drawText(win,"> Ping passerelle :",sx+14,cy+8,lbl,diagbg);
+    if(_netmgr_ping_ok<0)
+        sfcml_drawText(win,"Non teste (cliquer Ping passerelle)",sx+170,cy+8,sfcml_rgb(120,120,140),diagbg);
+    else if(_netmgr_ping_ok==1)
+        sfcml_drawText(win,"OK  (reponse recue)",sx+170,cy+8,sfcml_rgb(0,140,0),diagbg);
+    else
+        sfcml_drawText(win,"ECHEC (pas de reponse)",sx+170,cy+8,sfcml_rgb(180,20,20),diagbg);
+    sfcml_drawText(win,net_ok?"> Etat : Connecte":"> Etat : Deconnecte",
+        sx+14,cy+24,net_ok?sfcml_rgb(0,130,0):sfcml_rgb(160,20,20),diagbg);
+    (void)sh;
+}
+
+static void netmgr_click(int mx,int my){
+    AppWin*w=&_wins[W_NETMGR];
+    int sx=w->x+1,sy=w->y+TBAR_H;
+    /* Buttons are at cy = sy+242 (derived from draw_netmgr layout), height=28 */
+    int btn_y=sy+242,btn_h=28;
+    /* Bouton "Actualiser DHCP" (sx+8, btn_y, 160, 28) */
+    if(mx>=sx+8&&mx<sx+168&&my>=btn_y&&my<btn_y+btn_h){
+        if(net_ok)net_reconnect();
+        _netmgr_ping_ok=-1;
+        return;
+    }
+    /* Bouton "Ping passerelle" (sx+178, btn_y, 160, 28) */
+    if(mx>=sx+178&&mx<sx+338&&my>=btn_y&&my<btn_y+btn_h){
+        if(net_ok)_netmgr_ping_ok=net_ping_gw();
+        return;
+    }
+}
+
+/* ============================================================
  * Fond bureau (degrade)
  * ============================================================ */
 static void draw_bg(sfcml_Window* win){
+    int seg=(SCR_H-31)/9;
     for(int i=0;i<9;i++){
-        int y=i*50,h=(i<8)?50:49;
-        sfcml_fillRect(win,sfcml_rect(0,y,640,h),sfcml_rgb(
+        int y=i*seg,h=(i<8)?seg:(SCR_H-31-8*seg);
+        sfcml_fillRect(win,sfcml_rect(0,y,SCR_W,h),sfcml_rgb(
             (uint8_t)((int)C_DK.r*(i+1)/9),
             (uint8_t)((int)C_DK.g*(i+1)/9),
             (uint8_t)((int)C_DK.b*(i+1)/9)));
     }
-    for(int y=0;y<448;y+=20)
-        for(int x=44;x<640;x+=20)
+    for(int y=0;y<SCR_H-31;y+=20)
+        for(int x=44;x<SCR_W;x+=20)
             sfcml_drawPixel(win,x,y,sfcml_rgb(
                 (uint8_t)((int)C_DK.r/4+20<255?(int)C_DK.r/4+20:255),
                 (uint8_t)((int)C_DK.g/4+20<255?(int)C_DK.g/4+20:255),
@@ -2292,6 +3973,10 @@ static void redraw(sfcml_Window* win){
         else if(i==W_BROWSER)   draw_browser(win,i);
         else if(i==W_CALC)      draw_calc(win,i);
         else if(i==W_FILES)     draw_files(win,i);
+        else if(i==W_NETMGR)    draw_netmgr(win,i);
+        else if(i==W_SNAKE)     draw_snake(win,i);
+        else if(i==W_RTYPE)     draw_rtype(win,i);
+        else if(i==W_PONG)      draw_pong(win,i);
     }
     draw_taskbar(win);
     if(_start_open)draw_smenu(win);
@@ -2338,9 +4023,9 @@ static void on_press(int mx,int my,int btn){
     if(btn==1){_rcopen=1;_rcx=mx;_rcy=my;_start_open=0;return;}
     if(_rcopen){rcmenu_click(mx,my);return;}
     if(_start_open){smenu_click(mx,my);return;}
-    if(mx>=2&&mx<86&&my>=451&&my<477){_start_open=!_start_open;return;}
+    if(mx>=2&&mx<86&&my>=TB_Y+2&&my<TB_Y+28){_start_open=!_start_open;return;}
     /* Taskbar window buttons */
-    if(my>=451&&my<477){
+    if(my>=TB_Y+2&&my<TB_Y+28){
         int bx=88;
         for(int i=0;i<NW;i++){
             if(!_wins[i].visible)continue;
@@ -2359,7 +4044,7 @@ static void on_press(int mx,int my,int btn){
         if(!w->visible||w->minimized)continue;
         if(mx<w->x||mx>=w->x+w->w||my<w->y||my>=w->y+w->h)continue;
         win_front(i);
-        if(hit_x(i,mx,my)){w->visible=0;return;}
+        if(hit_x(i,mx,my)){w->visible=0;if(i==W_WORD)_nano_path[0]='\0';return;}
         if(hit_mn(i,mx,my)){w->minimized=1;return;}
         if(hit_tb(i,mx,my)){_drag_win=i;_drag_ox=mx-w->x;_drag_oy=my-w->y;return;}
         if(i==W_PAINT){paint_click(mx,my);return;}
@@ -2367,6 +4052,7 @@ static void on_press(int mx,int my,int btn){
         if(i==W_BROWSER){browser_click(mx,my);return;}
         if(i==W_CALC){calc_click(mx,my);return;}
         if(i==W_FILES){files_click(mx,my);return;}
+        if(i==W_NETMGR){netmgr_click(mx,my);return;}
         return;
     }
     /* Icons */
@@ -2383,10 +4069,289 @@ static void on_press(int mx,int my,int btn){
             else if(found==5)win_open(W_ABOUT);
             else if(found==6)cmd_reboot();
             else if(found==7)win_open(W_SETTINGS);
+            else if(found==9){win_open(W_SNAKE);snake_reset();}
+            else if(found==10){win_open(W_RTYPE);rtype_reset();}
+            else if(found==11){win_open(W_PONG);pong_reset();}
             else{win_open(W_BROWSER);_bnav(0);}
         }
         _sel_icon=found;
     } else {_sel_icon=-1;_start_open=0;_rcopen=0;}
+}
+
+
+/* ============================================================
+ * Jeu Snake
+ * ============================================================ */
+#define SN_CW    16
+#define SN_CH    16
+#define SN_COLS  36
+#define SN_ROWS  27
+#define SN_MAX   300
+#define SN_SPEED 7
+
+typedef struct{int x,y;}SnCell;
+static SnCell  _sn_body[SN_MAX];
+static int     _sn_len,_sn_dx,_sn_dy;
+static int     _sn_fx,_sn_fy;
+static int     _sn_score,_sn_tick,_sn_dead;
+
+static void snake_reset(void){
+    _sn_len=3;_sn_dx=1;_sn_dy=0;_sn_score=0;_sn_tick=0;_sn_dead=0;
+    _sn_body[0]=(SnCell){10,13};_sn_body[1]=(SnCell){9,13};_sn_body[2]=(SnCell){8,13};
+    _sn_fx=18;_sn_fy=13;
+}
+static void _sn_food(void){
+    static unsigned _snsd=7919;
+    for(int t=0;t<200;t++){
+        _snsd=_snsd*1103515245+12345;int x=(int)((_snsd>>16)%(unsigned)SN_COLS);
+        _snsd=_snsd*1103515245+12345;int y=(int)((_snsd>>16)%(unsigned)SN_ROWS);
+        int ok=1;
+        for(int i=0;i<_sn_len;i++)if(_sn_body[i].x==x&&_sn_body[i].y==y){ok=0;break;}
+        if(ok){_sn_fx=x;_sn_fy=y;return;}
+    }
+}
+static void snake_step(void){
+    if(_sn_dead)return;
+    if(++_sn_tick<SN_SPEED)return;
+    _sn_tick=0;
+    int nx=_sn_body[0].x+_sn_dx,ny=_sn_body[0].y+_sn_dy;
+    if(nx<0||nx>=SN_COLS||ny<0||ny>=SN_ROWS){_sn_dead=1;return;}
+    for(int i=0;i<_sn_len-1;i++)if(_sn_body[i].x==nx&&_sn_body[i].y==ny){_sn_dead=1;return;}
+    int ate=(nx==_sn_fx&&ny==_sn_fy);
+    if(!ate){for(int i=_sn_len-1;i>0;i--)_sn_body[i]=_sn_body[i-1];}
+    else{if(_sn_len<SN_MAX-1){for(int i=_sn_len;i>0;i--)_sn_body[i]=_sn_body[i-1];_sn_len++;}_sn_score+=10;_sn_food();}
+    _sn_body[0]=(SnCell){nx,ny};
+}
+static void snake_key(sfcml_KeyCode k){
+    if(k==SFCML_KEY_UP    &&_sn_dy==0){_sn_dx=0;_sn_dy=-1;}
+    else if(k==SFCML_KEY_DOWN &&_sn_dy==0){_sn_dx=0;_sn_dy= 1;}
+    else if(k==SFCML_KEY_LEFT &&_sn_dx==0){_sn_dx=-1;_sn_dy=0;}
+    else if(k==SFCML_KEY_RIGHT&&_sn_dx==0){_sn_dx= 1;_sn_dy=0;}
+    else if(k==SFCML_KEY_RETURN&&_sn_dead)snake_reset();
+}
+static void draw_snake(sfcml_Window* win,int wi){
+    AppWin* w=&_wins[wi];
+    int cx=w->x+1,cy=w->y+TBAR_H,cw=w->w-2,ch=w->h-TBAR_H-1;
+    sfcml_fillRect(win,sfcml_rect(cx,cy,cw,ch),sfcml_rgb(10,30,10));
+    sfcml_fillRect(win,sfcml_rect(cx+_sn_fx*SN_CW+2,cy+_sn_fy*SN_CH+2,SN_CW-4,SN_CH-4),sfcml_rgb(220,50,50));
+    for(int i=_sn_len-1;i>=0;i--){
+        sfcml_Color c=(i==0)?sfcml_rgb(60,220,60):sfcml_rgb(30,160,30);
+        sfcml_fillRect(win,sfcml_rect(cx+_sn_body[i].x*SN_CW+1,cy+_sn_body[i].y*SN_CH+1,SN_CW-2,SN_CH-2),c);
+    }
+    char _sb[16];itoa(_sn_score,_sb,10);
+    char _sc[32];strncpy(_sc,"Score: ",32);strncat(_sc,_sb,24);
+    sfcml_drawText(win,_sc,cx+4,cy+4,SFCML_WHITE,sfcml_rgb(10,30,10));
+    if(_sn_dead)
+        sfcml_drawText(win,"GAME OVER  [Entree=Rejouer]",cx+(cw/2)-104,cy+(ch/2)-4,sfcml_rgb(255,80,80),sfcml_rgb(0,0,0));
+}
+
+/* ============================================================
+ * Jeu R-Type
+ * ============================================================ */
+#define RT_BMAX  10
+#define RT_EMAX  8
+#define RT_SMAX  50
+#define RT_PW    28
+#define RT_PH    16
+#define RT_EW    24
+#define RT_EH    16
+#define RT_BW    8
+#define RT_BH    4
+
+typedef struct{int x,y,alive;}RTObj;
+static int     _rt_px,_rt_py;
+static int     _rt_pu,_rt_pd,_rt_pl,_rt_pr,_rt_fire;
+static RTObj   _rt_b[RT_BMAX];
+static RTObj   _rt_e[RT_EMAX];
+static int     _rt_edy[RT_EMAX];
+static int     _rt_etick,_rt_score,_rt_lives,_rt_fire_cd,_rt_dead,_rt_win;
+static int     _rt_stars[RT_SMAX][2];
+static unsigned _rt_seed=31337;
+
+static void rtype_reset(void){
+    AppWin* w=&_wins[W_RTYPE];
+    int gw=w->w-2,gh=w->h-TBAR_H-1;
+    _rt_px=40;_rt_py=gh/2-RT_PH/2;
+    _rt_pu=_rt_pd=_rt_pl=_rt_pr=_rt_fire=0;
+    _rt_score=0;_rt_lives=3;_rt_fire_cd=0;_rt_etick=0;_rt_dead=0;_rt_win=0;
+    for(int i=0;i<RT_BMAX;i++)_rt_b[i].alive=0;
+    for(int i=0;i<RT_EMAX;i++){
+        _rt_seed=_rt_seed*1103515245+12345;
+        int ey=(int)((_rt_seed>>8)%(unsigned)(gh-RT_EH));
+        _rt_e[i].x=gw-60-i*60;_rt_e[i].y=ey;_rt_e[i].alive=1;
+        _rt_edy[i]=(i%2==0)?1:-1;
+    }
+    for(int i=0;i<RT_SMAX;i++){
+        _rt_seed=_rt_seed*1103515245+12345;_rt_stars[i][0]=(int)((_rt_seed>>8)%(unsigned)gw);
+        _rt_seed=_rt_seed*1103515245+12345;_rt_stars[i][1]=(int)((_rt_seed>>8)%(unsigned)gh);
+    }
+}
+static void rtype_step(void){
+    if(_rt_dead||_rt_win)return;
+    AppWin* w=&_wins[W_RTYPE];
+    int gw=w->w-2,gh=w->h-TBAR_H-1;
+    if(_rt_pu&&_rt_py>0)_rt_py-=3;
+    if(_rt_pd&&_rt_py<gh-RT_PH)_rt_py+=3;
+    if(_rt_pl&&_rt_px>0)_rt_px-=3;
+    if(_rt_pr&&_rt_px<gw-RT_PW)_rt_px+=3;
+    if(_rt_fire_cd>0)_rt_fire_cd--;
+    if(_rt_fire&&_rt_fire_cd==0){
+        for(int i=0;i<RT_BMAX;i++)if(!_rt_b[i].alive){
+            _rt_b[i].x=_rt_px+RT_PW;_rt_b[i].y=_rt_py+RT_PH/2-RT_BH/2;_rt_b[i].alive=1;
+            _rt_fire_cd=6;break;
+        }
+    }
+    for(int i=0;i<RT_BMAX;i++){
+        if(!_rt_b[i].alive)continue;
+        _rt_b[i].x+=8;
+        if(_rt_b[i].x>=gw)_rt_b[i].alive=0;
+    }
+    if(++_rt_etick>=2){
+        _rt_etick=0;int all_dead=1;
+        for(int i=0;i<RT_EMAX;i++){
+            if(!_rt_e[i].alive)continue;
+            all_dead=0;
+            _rt_e[i].x-=2;_rt_e[i].y+=_rt_edy[i]*2;
+            if(_rt_e[i].y<0||_rt_e[i].y>gh-RT_EH)_rt_edy[i]=-_rt_edy[i];
+            if(_rt_e[i].x<-RT_EW)_rt_e[i].x=gw;
+            for(int b=0;b<RT_BMAX;b++){
+                if(!_rt_b[b].alive)continue;
+                if(_rt_b[b].x<_rt_e[i].x+RT_EW&&_rt_b[b].x+RT_BW>_rt_e[i].x&&
+                   _rt_b[b].y<_rt_e[i].y+RT_EH&&_rt_b[b].y+RT_BH>_rt_e[i].y){
+                    _rt_e[i].alive=0;_rt_b[b].alive=0;_rt_score+=100;
+                }
+            }
+            if(_rt_e[i].alive&&_rt_e[i].x<_rt_px+RT_PW&&_rt_e[i].x+RT_EW>_rt_px&&
+               _rt_e[i].y<_rt_py+RT_PH&&_rt_e[i].y+RT_EH>_rt_py){
+                _rt_lives--;_rt_e[i].alive=0;
+                if(_rt_lives<=0){_rt_dead=1;return;}
+            }
+        }
+        if(all_dead)_rt_win=1;
+    }
+    for(int i=0;i<RT_SMAX;i++){
+        _rt_stars[i][0]-=1+(i%3);
+        if(_rt_stars[i][0]<0){
+            _rt_stars[i][0]=gw-1;
+            _rt_seed=_rt_seed*1103515245+12345;
+            _rt_stars[i][1]=(int)((_rt_seed>>8)%(unsigned)gh);
+        }
+    }
+}
+static void rtype_key_press(sfcml_KeyCode k){
+    if(_rt_dead||_rt_win){if(k==SFCML_KEY_RETURN)rtype_reset();return;}
+    if(k==SFCML_KEY_UP)_rt_pu=1;
+    else if(k==SFCML_KEY_DOWN)_rt_pd=1;
+    else if(k==SFCML_KEY_LEFT)_rt_pl=1;
+    else if(k==SFCML_KEY_RIGHT)_rt_pr=1;
+    else if(k==SFCML_KEY_SPACE)_rt_fire=1;
+}
+static void rtype_key_release(sfcml_KeyCode k){
+    if(k==SFCML_KEY_UP)_rt_pu=0;
+    else if(k==SFCML_KEY_DOWN)_rt_pd=0;
+    else if(k==SFCML_KEY_LEFT)_rt_pl=0;
+    else if(k==SFCML_KEY_RIGHT)_rt_pr=0;
+    else if(k==SFCML_KEY_SPACE)_rt_fire=0;
+}
+static void draw_rtype(sfcml_Window* win,int wi){
+    AppWin* w=&_wins[wi];
+    int cx=w->x+1,cy=w->y+TBAR_H,cw=w->w-2,ch=w->h-TBAR_H-1;
+    sfcml_fillRect(win,sfcml_rect(cx,cy,cw,ch),sfcml_rgb(0,0,20));
+    for(int i=0;i<RT_SMAX;i++){
+        sfcml_Color sc2=(i%3==0)?sfcml_rgb(255,255,255):(i%3==1)?sfcml_rgb(180,180,220):sfcml_rgb(100,100,160);
+        sfcml_drawPixel(win,cx+_rt_stars[i][0],cy+_rt_stars[i][1],sc2);
+    }
+    for(int i=0;i<RT_BMAX;i++)
+        if(_rt_b[i].alive)sfcml_fillRect(win,sfcml_rect(cx+_rt_b[i].x,cy+_rt_b[i].y,RT_BW,RT_BH),sfcml_rgb(255,200,50));
+    for(int i=0;i<RT_EMAX;i++){
+        if(!_rt_e[i].alive)continue;
+        int ex=cx+_rt_e[i].x,ey=cy+_rt_e[i].y;
+        sfcml_fillRect(win,sfcml_rect(ex,ey,RT_EW,RT_EH),sfcml_rgb(180,20,20));
+        sfcml_fillRect(win,sfcml_rect(ex+2,ey+RT_EH/2-3,6,6),sfcml_rgb(255,80,80));
+    }
+    int px=cx+_rt_px,py=cy+_rt_py;
+    sfcml_fillRect(win,sfcml_rect(px,py+4,RT_PW-8,RT_PH-8),sfcml_rgb(50,150,255));
+    sfcml_fillRect(win,sfcml_rect(px+RT_PW-8,py+RT_PH/2-4,12,8),sfcml_rgb(80,200,255));
+    sfcml_fillRect(win,sfcml_rect(px+4,py,RT_PW-12,4),sfcml_rgb(0,100,200));
+    sfcml_fillRect(win,sfcml_rect(px+4,py+RT_PH-4,RT_PW-12,4),sfcml_rgb(0,100,200));
+    char _rb[16];itoa(_rt_score,_rb,10);
+    char _rs[32];strncpy(_rs,"Score:",32);strncat(_rs,_rb,24);
+    sfcml_drawText(win,_rs,cx+4,cy+4,SFCML_WHITE,sfcml_rgb(0,0,20));
+    for(int i=0;i<_rt_lives&&i<5;i++)
+        sfcml_fillRect(win,sfcml_rect(cx+cw-20-i*14,cy+4,10,8),sfcml_rgb(50,150,255));
+    if(_rt_dead)sfcml_drawText(win,"GAME OVER  [Entree=Rejouer]",cx+cw/2-104,cy+ch/2-4,sfcml_rgb(255,80,80),sfcml_rgb(0,0,0));
+    if(_rt_win) sfcml_drawText(win,"VICTOIRE!  [Entree=Rejouer]",cx+cw/2-104,cy+ch/2-4,sfcml_rgb(80,255,80),sfcml_rgb(0,0,0));
+}
+
+/* ============================================================
+ * Jeu Pong
+ * ============================================================ */
+#define PG_PW    12
+#define PG_PH    60
+#define PG_BS    10
+#define PG_SPD   4
+
+static int _pg_p1y,_pg_p2y;
+static int _pg_bx,_pg_by,_pg_bdx,_pg_bdy;
+static int _pg_sc1,_pg_sc2;
+static int _pg_pu,_pg_pd;
+
+static void pong_reset(void){
+    AppWin* w=&_wins[W_PONG];
+    int gw=w->w-2,gh=w->h-TBAR_H-1;
+    _pg_p1y=gh/2-PG_PH/2;_pg_p2y=gh/2-PG_PH/2;
+    _pg_bx=gw/2;_pg_by=gh/2;_pg_bdx=3;_pg_bdy=2;
+    _pg_sc1=0;_pg_sc2=0;_pg_pu=_pg_pd=0;
+}
+static void pong_step(void){
+    AppWin* w=&_wins[W_PONG];
+    int gw=w->w-2,gh=w->h-TBAR_H-1;
+    if(_pg_pu&&_pg_p1y>0)_pg_p1y-=PG_SPD;
+    if(_pg_pd&&_pg_p1y<gh-PG_PH)_pg_p1y+=PG_SPD;
+    int ai_cy=_pg_p2y+PG_PH/2;
+    if(ai_cy<_pg_by)_pg_p2y+=PG_SPD-1;
+    else if(ai_cy>_pg_by+PG_BS)_pg_p2y-=PG_SPD-1;
+    if(_pg_p2y<0)_pg_p2y=0;if(_pg_p2y>gh-PG_PH)_pg_p2y=gh-PG_PH;
+    _pg_bx+=_pg_bdx;_pg_by+=_pg_bdy;
+    if(_pg_by<=0){_pg_by=0;_pg_bdy=-_pg_bdy;}
+    if(_pg_by>=gh-PG_BS){_pg_by=gh-PG_BS;_pg_bdy=-_pg_bdy;}
+    if(_pg_bdx<0&&_pg_bx<=PG_PW+6&&_pg_bx>=PG_PW-4&&
+       _pg_by+PG_BS>_pg_p1y&&_pg_by<_pg_p1y+PG_PH){
+        _pg_bdx=-_pg_bdx;
+        int rel=(_pg_by+PG_BS/2)-(_pg_p1y+PG_PH/2);
+        _pg_bdy=rel/8;if(_pg_bdy==0)_pg_bdy=(_pg_bdy>=0)?1:-1;
+    }
+    if(_pg_bdx>0&&_pg_bx+PG_BS>=gw-PG_PW-6&&_pg_bx+PG_BS<=gw-PG_PW+4&&
+       _pg_by+PG_BS>_pg_p2y&&_pg_by<_pg_p2y+PG_PH){
+        _pg_bdx=-_pg_bdx;
+        int rel=(_pg_by+PG_BS/2)-(_pg_p2y+PG_PH/2);
+        _pg_bdy=rel/8;if(_pg_bdy==0)_pg_bdy=(_pg_bdy>=0)?1:-1;
+    }
+    if(_pg_bx<=0){_pg_sc2++;_pg_bx=gw/2;_pg_by=gh/2;_pg_bdx=3;_pg_bdy=2;}
+    if(_pg_bx>=gw){_pg_sc1++;_pg_bx=gw/2;_pg_by=gh/2;_pg_bdx=-3;_pg_bdy=2;}
+}
+static void pong_key_press(sfcml_KeyCode k){
+    if(k==SFCML_KEY_UP||k==SFCML_KEY_W)_pg_pu=1;
+    else if(k==SFCML_KEY_DOWN||k==SFCML_KEY_S)_pg_pd=1;
+    else if(k==SFCML_KEY_RETURN)pong_reset();
+}
+static void pong_key_release(sfcml_KeyCode k){
+    if(k==SFCML_KEY_UP||k==SFCML_KEY_W)_pg_pu=0;
+    else if(k==SFCML_KEY_DOWN||k==SFCML_KEY_S)_pg_pd=0;
+}
+static void draw_pong(sfcml_Window* win,int wi){
+    AppWin* w=&_wins[wi];
+    int cx=w->x+1,cy=w->y+TBAR_H,cw=w->w-2,ch=w->h-TBAR_H-1;
+    sfcml_fillRect(win,sfcml_rect(cx,cy,cw,ch),sfcml_rgb(10,10,30));
+    for(int y=0;y<ch;y+=10)sfcml_drawHLine(win,cx+cw/2-1,cy+y,2,sfcml_rgb(60,60,90));
+    sfcml_fillRect(win,sfcml_rect(cx+6,cy+_pg_p1y,PG_PW,PG_PH),SFCML_WHITE);
+    sfcml_fillRect(win,sfcml_rect(cx+cw-6-PG_PW,cy+_pg_p2y,PG_PW,PG_PH),sfcml_rgb(200,80,80));
+    sfcml_fillRect(win,sfcml_rect(cx+_pg_bx,cy+_pg_by,PG_BS,PG_BS),SFCML_WHITE);
+    char _pb1[8],_pb2[8];
+    itoa(_pg_sc1,_pb1,10);itoa(_pg_sc2,_pb2,10);
+    sfcml_drawText(win,_pb1,cx+cw/2-20,cy+8,SFCML_WHITE,sfcml_rgb(10,10,30));
+    sfcml_drawText(win,_pb2,cx+cw/2+12,cy+8,SFCML_WHITE,sfcml_rgb(10,10,30));
+    sfcml_drawText(win,"W/S ou Haut/Bas pour jouer",cx+cw/2-96,cy+ch-14,sfcml_rgb(120,120,180),sfcml_rgb(10,10,30));
 }
 
 /* ============================================================
@@ -2428,8 +4393,8 @@ void kmain(void){
                 if(_drag_win>=0){
                     AppWin* w=&_wins[_drag_win];
                     w->x=_mx-_drag_ox;w->y=_my-_drag_oy;
-                    if(w->x<0)w->x=0;if(w->x+w->w>640)w->x=640-w->w;
-                    if(w->y<0)w->y=0;if(w->y+w->h>448)w->y=448-w->h;
+                    if(w->x<0)w->x=0;if(w->x+w->w>SCR_W)w->x=SCR_W-w->w;
+                    if(w->y<0)w->y=0;if(w->y+w->h>TB_Y)w->y=TB_Y-w->h;
                 } else if(_painting&&_focus==W_PAINT&&_wins[W_PAINT].visible&&!_wins[W_PAINT].minimized){
                     AppWin* w=&_wins[W_PAINT];
                     int cax=w->x+1+PAINT_SB,cay=w->y+TBAR_H+PAINT_TB;
@@ -2448,11 +4413,21 @@ void kmain(void){
                 _drag_win=-1;_painting=0;
                 break;
 
+            case SFCML_EVT_KEY_RELEASED:{
+                int foc=_focus;
+                int fopen=(foc>=0&&_wins[foc].visible&&!_wins[foc].minimized);
+                if(fopen&&foc==W_RTYPE)rtype_key_release(evt.key.code);
+                else if(fopen&&foc==W_PONG)pong_key_release(evt.key.code);
+                break;
+            }
+
             case SFCML_EVT_KEY_PRESSED:{
                 if(_sleeping){_sleeping=0;_inact_secs=0;break;}
                 int foc=_focus;
                 int fopen=(foc>=0&&_wins[foc].visible&&!_wins[foc].minimized);
-                if(fopen&&foc==W_SETTINGS){
+                if(fopen&&foc==W_NETMGR){
+                    if(evt.key.code==SFCML_KEY_ESCAPE)_wins[W_NETMGR].minimized=1;
+                } else if(fopen&&foc==W_SETTINGS){
                     if(evt.key.code==SFCML_KEY_ESCAPE)_wins[W_SETTINGS].minimized=1;
                 } else if(fopen&&foc==W_CALC){
                     if(evt.key.code==SFCML_KEY_ESCAPE)_wins[W_CALC].minimized=1;
@@ -2492,6 +4467,15 @@ void kmain(void){
                 } else if(fopen&&foc==W_WORD){
                     if(evt.key.code==SFCML_KEY_ESCAPE)_wins[W_WORD].minimized=1;
                     else word_key(evt.key.code);
+                } else if(fopen&&foc==W_SNAKE){
+                    if(evt.key.code==SFCML_KEY_ESCAPE)_wins[W_SNAKE].minimized=1;
+                    else snake_key(evt.key.code);
+                } else if(fopen&&foc==W_RTYPE){
+                    if(evt.key.code==SFCML_KEY_ESCAPE)_wins[W_RTYPE].minimized=1;
+                    else rtype_key_press(evt.key.code);
+                } else if(fopen&&foc==W_PONG){
+                    if(evt.key.code==SFCML_KEY_ESCAPE)_wins[W_PONG].minimized=1;
+                    else pong_key_press(evt.key.code);
                 } else {
                     int has_t=_wins[W_TERM].visible&&!_wins[W_TERM].minimized;
                     if(!has_t){if(evt.key.code==SFCML_KEY_ESCAPE)cmd_reboot();break;}
@@ -2552,6 +4536,11 @@ void kmain(void){
             }
         }
         if(got){ _inact_secs=0; if(_sleeping){_sleeping=0;dirty=1;} dirty=1; }
+        if(!_sleeping){
+            if(_wins[W_SNAKE].visible&&!_wins[W_SNAKE].minimized){snake_step();dirty=1;}
+            if(_wins[W_RTYPE].visible&&!_wins[W_RTYPE].minimized){rtype_step();dirty=1;}
+            if(_wins[W_PONG].visible&&!_wins[W_PONG].minimized){pong_step();dirty=1;}
+        }
         if(_sleeping){ draw_screensaver(win); }
         else if(dirty){ redraw(win);dirty=0; }
         else __asm__ volatile("pause");

@@ -8,7 +8,7 @@
 
 KERNEL_SEG   equ 0x1000       ; adresse lineaire 0x10000
 KERNEL_SECTS equ 128          ; 128*512=65536 => chunk 1
-KERNEL_CHS_S equ 18           ; CHS sector = LBA 17 + 1 = 18
+KERNEL_LBA   equ 17           ; LBA 17 (apres MBR+stage2)
 VGA          equ 0xB800
 TIMEOUT      equ 5
 
@@ -458,20 +458,15 @@ show_loading:
     ret
 
 ; =============================================================
-; load_kernel: charge KERNEL_SECTS secteurs en CHS (AH=02h)
-; 96 secteurs * 512 = 49KB depuis 0x10000 => reste sous 0x20000 (pas de DMA overflow)
+; load_kernel: charge le kernel via LBA etendu (Int 13h/AH=42h)
+; Fonctionne sur HDD, USB, floppy emule
+; Chunk1: LBA 17  -> 0x10000 (128 secteurs = 64KB)
+; Chunk2: LBA 145 -> 0x20000 (128 secteurs = 64KB)
 ; =============================================================
 load_kernel:
-    ; Chunk 1: 128 sectors from CHS(0,0,18) -> ES=0x1000, BX=0 (physical 0x10000)
-    mov ax, KERNEL_SEG
-    mov es, ax
-    xor bx, bx
-
-    mov ah, 0x02
-    mov al, KERNEL_SECTS
-    mov ch, 0
-    mov cl, KERNEL_CHS_S
-    mov dh, 0
+    ; Chunk 1 : LBA 17 -> 0x10000
+    mov si, dap_k1
+    mov ah, 0x42
     mov dl, [boot_drive]
     int 0x13
     jnc .chunk2
@@ -486,23 +481,46 @@ load_kernel:
     jmp $
 
 .chunk2:
-    ; Chunk 2: 128 sectors from CHS(4,0,2) -> ES=0x2000, BX=0 (physical 0x20000)
-    ; LBA 145 = cylinder 4, head 0, sector 2
-    mov ax, 0x2000
-    mov es, ax
-    xor bx, bx
-
-    mov ah, 0x02
-    mov al, 128
-    mov ch, 4          ; cylinder 4
-    mov cl, 2          ; sector 2
-    mov dh, 0          ; head 0
+    ; Chunk 2 : LBA 145 -> 0x20000
+    mov si, dap_k2
+    mov ah, 0x42
     mov dl, [boot_drive]
     int 0x13
-    ; if second chunk fails, just continue (may be empty)
+
+.chunk3:
+    ; Chunk 3 : LBA 273 -> 0x30000 (kernel > 128 Ko)
+    mov si, dap_k3
+    mov ah, 0x42
+    mov dl, [boot_drive]
+    int 0x13
+    ; on ignore l'erreur si le chunk3 est vide
 
 .ok:
     ret
+
+; DAP chunk 1 : LBA 17, 128 secteurs -> 0x10000
+dap_k1:
+    db 0x10, 0
+    dw 128
+    dw 0x0000
+    dw 0x1000
+    dq KERNEL_LBA   ; LBA 17
+
+; DAP chunk 2 : LBA 145, 128 secteurs -> 0x20000
+dap_k2:
+    db 0x10, 0
+    dw 128
+    dw 0x0000
+    dw 0x2000
+    dq 145          ; LBA 145 (17 + 128)
+
+; DAP chunk 3 : LBA 273, 128 secteurs -> 0x30000
+dap_k3:
+    db 0x10, 0
+    dw 128
+    dw 0x0000
+    dw 0x3000
+    dq 273          ; LBA 273 (17 + 128 + 128)
 
 ; =============================================================
 ; setup_vesa: active mode graphique 640x480x24bpp via BIOS VBE
@@ -521,9 +539,9 @@ setup_vesa:
     mov es, ax
     mov di, VESA_BUF
 
-    ; Interroge le mode 0x0112 (640x480x24bpp)
+    ; Interroge le mode 0x0115 (800x600x24bpp)
     mov ax, 0x4F01
-    mov cx, 0x0112
+    mov cx, 0x0115
     int 0x10
     cmp ax, 0x004F
     jne .fallback
@@ -538,14 +556,14 @@ setup_vesa:
 
     ; Active le mode avec le bit Linear Framebuffer (bit 14 = 0x4000)
     mov ax, 0x4F02
-    mov bx, 0x4112
+    mov bx, 0x4115
     int 0x10
     cmp ax, 0x004F          ; verifie le code de retour AVANT tout pop
     jne .fallback
 
     ; BOOT_INFO+0 deja rempli, complete le reste
-    mov word  [BOOT_INFO + 4], 640   ; largeur
-    mov word  [BOOT_INFO + 6], 480   ; hauteur
+    mov word  [BOOT_INFO + 4], 800   ; largeur
+    mov word  [BOOT_INFO + 6], 600   ; hauteur
     mov byte  [BOOT_INFO + 8], 24    ; bpp
     mov byte  [BOOT_INFO + 9], 1     ; flag VESA actif
     ret
@@ -574,7 +592,7 @@ show_vesa_status:
     call vga_str
     ret
 
-str_vesa_ok db '[Mode VESA 640x480x24bpp OK]', 0
+str_vesa_ok db '[Mode VESA 800x600x24bpp OK]', 0
 str_vesa_no db '[Fallback: VGA texte 80x25]', 0
 
 ; =============================================================

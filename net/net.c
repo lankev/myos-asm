@@ -1,8 +1,8 @@
 /* net/net.c — Minimal TCP/IP network stack for MyOS
-   RTL8139 NIC + ARP + IP + UDP + DNS + TCP + HTTP     */
+   RTL8139 NIC + ARP + IP + UDP + DNS + TCP + HTTP + DHCP     */
 #include "net.h"
-#include <string.h>
-#include <stdint.h>
+#include "string.h"
+#include "stdint.h"
 
 /* ---- I/O helpers ---- */
 static inline uint8_t  inb(uint16_t p){uint8_t  v;__asm__ volatile("inb %1,%0":"=a"(v):"Nd"(p));return v;}
@@ -43,18 +43,24 @@ static void pci_wr(uint8_t b,uint8_t d,uint8_t f,uint8_t r,uint32_t v){
 #define R_CFG1   0x52
 
 static uint16_t _io;
-static uint8_t  _mac[6];
+uint8_t  net_mac[6];
+uint32_t net_my_ip   = 0x0A00020F;  /* 10.0.2.15  (fallback static) */
+uint32_t net_gw_ip   = 0x0A000202;  /* 10.0.2.2   */
+uint32_t net_dns_ip  = 0x0A000203;  /* 10.0.2.3   */
+uint32_t net_netmask = 0xFFFFFF00;  /* 255.255.255.0 */
+int      net_dhcp_ok = 0;
+int      net_ok      = 0;
+
+/* Aliases so existing code still compiles unchanged */
+#define MY_IP  net_my_ip
+#define GW_IP  net_gw_ip
+#define DNS_IP net_dns_ip
+
 static uint8_t  _rxbuf[8192+16] __attribute__((aligned(4)));
 static uint8_t  _txbuf[4][1800] __attribute__((aligned(4)));
 static int      _txcur;
 static uint32_t _rxcur;
-int net_ok=0;
-
-/* Hardcoded QEMU SLIRP */
-#define MY_IP  0x0A00020F  /* 10.0.2.15  */
-#define GW_IP  0x0A000202  /* 10.0.2.2   */
-#define DNS_IP 0x0A000203  /* 10.0.2.3   */
-static uint8_t _gwmac[6];
+static uint8_t  _gwmac[6];
 static const uint8_t _bcast[6]={0xFF,0xFF,0xFF,0xFF,0xFF,0xFF};
 
 /* ---- RTL8139 ---- */
@@ -62,7 +68,7 @@ static int rtl_find(void){
     for(uint8_t d=0;d<32;d++){
         uint32_t v=pci_rd(0,d,0,0);
         if((v&0xFFFF)==0x10EC&&(v>>16)==0x8139){
-            pci_wr(0,d,0,4,pci_rd(0,d,0,4)|0x04); /* bus master */
+            pci_wr(0,d,0,4,pci_rd(0,d,0,4)|0x04);
             _io=(uint16_t)(pci_rd(0,d,0,0x10)&0xFFFC);
             return 1;
         }
@@ -70,16 +76,16 @@ static int rtl_find(void){
     return 0;
 }
 static void rtl_init(void){
-    outb(_io+R_CFG1,0);           /* power on */
-    outb(_io+R_CMD,0x10);         /* reset */
+    outb(_io+R_CFG1,0);
+    outb(_io+R_CMD,0x10);
     while(inb(_io+R_CMD)&0x10)ndelay(1000);
-    for(int i=0;i<6;i++)_mac[i]=inb(_io+R_IDR0+i);
+    for(int i=0;i<6;i++)net_mac[i]=inb(_io+R_IDR0+i);
     outl(_io+R_RBST,(uint32_t)_rxbuf);
     outw(_io+R_IMR,0);
     outw(_io+R_ISR,0xFFFF);
-    outl(_io+R_RCR,0xF|(1<<7)|(7<<8)); /* AB|AM|APM|AAP + WRAP + unlimited DMA */
+    outl(_io+R_RCR,0xF|(1<<7)|(7<<8));
     outl(_io+R_TCR,(3<<24)|(6<<8));
-    outb(_io+R_CMD,0x0C);         /* enable TX+RX */
+    outb(_io+R_CMD,0x0C);
     _rxcur=0;_txcur=0;
 }
 static void rtl_tx(const void*p,uint16_t len){
@@ -92,7 +98,7 @@ static void rtl_tx(const void*p,uint16_t len){
 }
 static uint16_t rtl_rx(void*buf,uint32_t iters){
     for(uint32_t t=0;t<iters;t++){
-        if(inb(_io+R_CMD)&0x01){ndelay(10);continue;} /* BUFE: buffer empty */
+        if(inb(_io+R_CMD)&0x01){ndelay(10);continue;}
         uint8_t*p=_rxbuf+_rxcur;
         uint16_t stat=*(uint16_t*)p;
         uint16_t plen=*(uint16_t*)(p+2);
@@ -125,6 +131,19 @@ typedef struct __attribute__((packed)){uint16_t sp,dp,ln,cs;}UH;
 typedef struct __attribute__((packed)){
     uint16_t sp,dp;uint32_t sq,ak;uint8_t off,fl;uint16_t wn,cs,ug;
 }TH;
+typedef struct __attribute__((packed)){uint8_t type,code;uint16_t cs,id,seq;}ICH;
+
+/* DHCP/BOOTP packet (300 bytes fixed per RFC 1497) */
+typedef struct __attribute__((packed)){
+    uint8_t  op,htype,hlen,hops;
+    uint32_t xid;
+    uint16_t secs,flags;
+    uint32_t ciaddr,yiaddr,siaddr,giaddr;
+    uint8_t  chaddr[16];
+    uint8_t  sname[64];
+    uint8_t  file[128];
+    uint8_t  options[64];
+} DHCP_PKT;
 
 /* ---- Checksum ---- */
 static uint16_t cksum(const void*b,int n){
@@ -150,10 +169,10 @@ static uint16_t udp_cs(uint32_t si,uint32_t di,const void*seg,uint16_t ul){
 /* ---- ARP ---- */
 static void arp_req(uint32_t tip){
     uint8_t fr[60];memset(fr,0,60);
-    EH*e=(EH*)fr;memcpy(e->d,_bcast,6);memcpy(e->s,_mac,6);e->t=htons(0x0806);
+    EH*e=(EH*)fr;memcpy(e->d,_bcast,6);memcpy(e->s,net_mac,6);e->t=htons(0x0806);
     AH*a=(AH*)(fr+14);
     a->ht=htons(1);a->pt=htons(0x0800);a->hl=6;a->pl=4;a->op=htons(1);
-    memcpy(a->sha,_mac,6);a->spa=htonl(MY_IP);
+    memcpy(a->sha,net_mac,6);a->spa=htonl(MY_IP);
     memset(a->tha,0,6);a->tpa=htonl(tip);
     rtl_tx(fr,60);
 }
@@ -183,15 +202,13 @@ static int dns_resolve(const char*host,uint32_t*ip){
     }
     q[pos++]=0;q[pos++]=0;q[pos++]=1;q[pos++]=0;q[pos++]=1;
     uint16_t ql=(uint16_t)pos;
-    /* UDP packet */
     uint8_t udp[8+512];
     UH*u=(UH*)udp;u->sp=htons(12345);u->dp=htons(53);
     u->ln=htons((uint16_t)(8+ql));u->cs=0;
     memcpy(udp+8,q,ql);
     u->cs=udp_cs(htonl(MY_IP),htonl(DNS_IP),udp,(uint16_t)(8+ql));
-    /* IP+Eth frame */
     uint8_t fr[600];
-    EH*e=(EH*)fr;memcpy(e->d,_gwmac,6);memcpy(e->s,_mac,6);e->t=htons(0x0800);
+    EH*e=(EH*)fr;memcpy(e->d,_gwmac,6);memcpy(e->s,net_mac,6);e->t=htons(0x0800);
     IH*iph=(IH*)(fr+14);
     iph->ihl=0x45;iph->tos=0;iph->len=htons((uint16_t)(20+8+ql));
     static uint16_t id2=100;iph->id=htons(id2++);iph->fl=0;
@@ -199,7 +216,6 @@ static int dns_resolve(const char*host,uint32_t*ip){
     iph->cs=cksum(iph,20);
     memcpy(fr+34,udp,8+ql);
     rtl_tx(fr,(uint16_t)(14+20+8+ql));
-    /* Wait for reply */
     uint8_t rb[1500];
     for(int i=0;i<1000000;i++){
         uint16_t l=rtl_rx(rb,5);
@@ -208,7 +224,7 @@ static int dns_resolve(const char*host,uint32_t*ip){
         IH*ri=(IH*)(rb+14);if(ri->pr!=17)continue;
         UH*ru=(UH*)(rb+34);if(ntohs(ru->dp)!=12345)continue;
         uint8_t*dns=rb+42;int dlen=l-42;
-        if(!(dns[2]&0x80))continue; /* not a response */
+        if(!(dns[2]&0x80))continue;
         int dpos=12;
         int qc=(dns[4]<<8)|dns[5];
         for(int j=0;j<qc&&dpos<dlen;j++){
@@ -216,8 +232,8 @@ static int dns_resolve(const char*host,uint32_t*ip){
                 if((dns[dpos]&0xC0)==0xC0){dpos+=2;break;}
                 dpos+=dns[dpos]+1;
             }
-            if(dns[dpos]!=0){}else{dpos++;} /* null label */
-            dpos+=4; /* type+class */
+            if(dns[dpos]!=0){}else{dpos++;}
+            dpos+=4;
         }
         int ac=(dns[6]<<8)|dns[7];
         for(int j=0;j<ac&&dpos+12<=dlen;j++){
@@ -246,7 +262,7 @@ static uint16_t _next_port=49152;
 
 static void tcp_tx(uint8_t fl,const void*data,uint16_t dl){
     uint8_t fr[1500];
-    EH*e=(EH*)fr;memcpy(e->d,_dst_mac,6);memcpy(e->s,_mac,6);e->t=htons(0x0800);
+    EH*e=(EH*)fr;memcpy(e->d,_dst_mac,6);memcpy(e->s,net_mac,6);e->t=htons(0x0800);
     IH*ip=(IH*)(fr+14);
     uint16_t tl=(uint16_t)(20+dl);
     ip->ihl=0x45;ip->tos=0;ip->len=htons((uint16_t)(20+tl));
@@ -261,8 +277,6 @@ static void tcp_tx(uint8_t fl,const void*data,uint16_t dl){
     t->cs=tcp_cs(htonl(MY_IP),htonl(_dst_ip),t,tl);
     rtl_tx(fr,(uint16_t)(14+20+tl));
 }
-
-/* Returns data length; updates _ackn; sets *ofl to received flags */
 static uint16_t tcp_rx(uint8_t*ofl,void*data,uint16_t bsz,uint32_t iters){
     uint8_t buf[1500];*ofl=0;
     for(uint32_t t=0;t<iters;t++){
@@ -280,74 +294,222 @@ static uint16_t tcp_rx(uint8_t*ofl,void*data,uint16_t bsz,uint32_t iters){
         if(dl>bsz)dl=bsz;
         if(dl>0&&data)memcpy(data,buf+34+doff,dl);
         uint32_t na=ntohl(th->sq)+dl;
-        if(th->fl&0x02)na++; /* SYN */
-        if(th->fl&0x01)na++; /* FIN */
+        if(th->fl&0x02)na++;
+        if(th->fl&0x01)na++;
         _ackn=na;
         return dl;
     }
     return 0;
 }
-
 static int tcp_connect(uint32_t ip,uint16_t port){
     _dst_ip=ip;_dst_port=port;_src_port=_next_port++;
     _seq=0xABCD1234;_ackn=0;
     memcpy(_dst_mac,_gwmac,6);
-    tcp_tx(0x02,0,0); /* SYN */
+    tcp_tx(0x02,0,0);
     _seq++;
     uint8_t fl;
     for(int i=0;i<2000000;i++){
         tcp_rx(&fl,0,0,1);
-        if(fl&0x12){tcp_tx(0x10,0,0);return 1;} /* SYN+ACK -> ACK */
-        if(fl&0x04)return 0; /* RST */
+        if(fl&0x12){tcp_tx(0x10,0,0);return 1;}
+        if(fl&0x04)return 0;
     }
     return 0;
 }
 
 /* ---- HTTP ---- */
 static int http_get_raw(const char*host,const char*path,char*buf,int bsz){
-    /* Build GET request */
     char req[512];int rl=0;
     #define A(s) {const char*_s=(s);while(*_s&&rl<500)req[rl++]=*_s++;}
     A("GET ") A(path) A(" HTTP/1.0\r\nHost: ") A(host) A("\r\nUser-Agent: MyBrowser/1.0\r\nConnection: close\r\n\r\n")
     #undef A
     req[rl]='\0';
-    tcp_tx(0x18,(uint8_t*)req,(uint16_t)rl); /* PSH+ACK */
+    tcp_tx(0x18,(uint8_t*)req,(uint16_t)rl);
     _seq+=(uint32_t)rl;
     int total=0;uint8_t fl;
     uint8_t rb[1460];
     for(int i=0;i<200000&&total<bsz-1;i++){
         uint16_t dl=tcp_rx(&fl,rb,sizeof(rb),100);
         if(dl>0){
-            tcp_tx(0x10,0,0); /* ACK */
+            tcp_tx(0x10,0,0);
             int sp=bsz-1-total;if(dl>sp)dl=(uint16_t)sp;
             memcpy(buf+total,rb,dl);total+=dl;
         }
-        if(fl&0x01){tcp_tx(0x11,0,0);break;} /* FIN */
-        if(fl&0x04)break; /* RST */
+        if(fl&0x01){tcp_tx(0x11,0,0);break;}
+        if(fl&0x04)break;
     }
     buf[total]='\0';return total;
+}
+
+/* ---- DHCP ---- */
+static int _dhcp_opt(const uint8_t*opts,int len,uint8_t code,uint8_t*out,int maxout){
+    int i=4; /* skip magic cookie */
+    while(i<len){
+        if(opts[i]==255)break;
+        if(opts[i]==0){i++;continue;}
+        uint8_t c=opts[i],l=opts[i+1];
+        if(c==code){int n=l<maxout?l:maxout;memcpy(out,opts+i+2,(size_t)n);return n;}
+        i+=2+l;
+    }
+    return 0;
+}
+
+static void _dhcp_tx(uint8_t msg_type,uint32_t req_ip,uint32_t srv_ip){
+    DHCP_PKT pkt;
+    memset(&pkt,0,sizeof(pkt));
+    pkt.op=1;pkt.htype=1;pkt.hlen=6;
+    pkt.xid=htonl(0xDEADBEEF);
+    pkt.flags=htons(0x8000); /* broadcast flag */
+    memcpy(pkt.chaddr,net_mac,6);
+    /* DHCP magic cookie */
+    pkt.options[0]=99;pkt.options[1]=130;pkt.options[2]=83;pkt.options[3]=99;
+    int o=4;
+    pkt.options[o++]=53;pkt.options[o++]=1;pkt.options[o++]=msg_type;
+    if(req_ip){
+        pkt.options[o++]=50;pkt.options[o++]=4;
+        pkt.options[o++]=(uint8_t)(req_ip>>24);pkt.options[o++]=(uint8_t)(req_ip>>16);
+        pkt.options[o++]=(uint8_t)(req_ip>>8); pkt.options[o++]=(uint8_t)(req_ip);
+    }
+    if(srv_ip){
+        pkt.options[o++]=54;pkt.options[o++]=4;
+        pkt.options[o++]=(uint8_t)(srv_ip>>24);pkt.options[o++]=(uint8_t)(srv_ip>>16);
+        pkt.options[o++]=(uint8_t)(srv_ip>>8); pkt.options[o++]=(uint8_t)(srv_ip);
+    }
+    pkt.options[o++]=55;pkt.options[o++]=3;
+    pkt.options[o++]=1; /* subnet mask */
+    pkt.options[o++]=3; /* router */
+    pkt.options[o++]=6; /* DNS */
+    pkt.options[o]=255; /* end */
+    /* Build frame: Eth(14) + IP(20) + UDP(8) + DHCP(300) = 342 */
+    uint16_t udp_len=(uint16_t)(8+sizeof(DHCP_PKT));
+    uint8_t fr[14+20+8+300];
+    EH*e=(EH*)fr;
+    memcpy(e->d,_bcast,6);memcpy(e->s,net_mac,6);e->t=htons(0x0800);
+    IH*ip=(IH*)(fr+14);
+    ip->ihl=0x45;ip->tos=0;ip->len=htons((uint16_t)(20+udp_len));
+    static uint16_t dhcp_id=300;ip->id=htons(dhcp_id++);ip->fl=0;
+    ip->ttl=64;ip->pr=17;ip->cs=0;
+    ip->s=0;            /* 0.0.0.0 — no IP yet */
+    ip->d=0xFFFFFFFF;   /* 255.255.255.255 broadcast */
+    ip->cs=cksum(ip,20);
+    UH*u=(UH*)(fr+34);
+    u->sp=htons(68);u->dp=htons(67);u->ln=htons(udp_len);u->cs=0;
+    memcpy(fr+42,&pkt,sizeof(DHCP_PKT));
+    rtl_tx(fr,(uint16_t)(14+20+udp_len));
+}
+
+int net_dhcp(void){
+    _dhcp_tx(1,0,0); /* DHCPDISCOVER */
+    uint8_t buf[600];
+    uint32_t offer_ip=0,srv_ip=0;
+    /* Wait for OFFER */
+    for(int i=0;i<3000000;i++){
+        uint16_t l=rtl_rx(buf,5);
+        if(l<14+20+8+240)continue;
+        EH*e=(EH*)buf;if(ntohs(e->t)!=0x0800)continue;
+        IH*ip=(IH*)(buf+14);if(ip->pr!=17)continue;
+        UH*u=(UH*)(buf+34);if(ntohs(u->dp)!=68)continue;
+        DHCP_PKT*d=(DHCP_PKT*)(buf+42);
+        if(d->op!=2)continue;
+        if(d->xid!=htonl(0xDEADBEEF))continue;
+        if(d->options[0]!=99||d->options[1]!=130)continue;
+        uint8_t mtype=0;
+        _dhcp_opt(d->options,64,53,&mtype,1);
+        if(mtype!=2)continue; /* not OFFER */
+        offer_ip=ntohl(d->yiaddr);
+        uint8_t sv[4];
+        if(_dhcp_opt(d->options,64,54,sv,4)==4)
+            srv_ip=((uint32_t)sv[0]<<24)|((uint32_t)sv[1]<<16)|((uint32_t)sv[2]<<8)|sv[3];
+        break;
+    }
+    if(!offer_ip)return 0;
+    _dhcp_tx(3,offer_ip,srv_ip); /* DHCPREQUEST */
+    /* Wait for ACK */
+    for(int i=0;i<3000000;i++){
+        uint16_t l=rtl_rx(buf,5);
+        if(l<14+20+8+240)continue;
+        EH*e=(EH*)buf;if(ntohs(e->t)!=0x0800)continue;
+        IH*ip=(IH*)(buf+14);if(ip->pr!=17)continue;
+        UH*u=(UH*)(buf+34);if(ntohs(u->dp)!=68)continue;
+        DHCP_PKT*d=(DHCP_PKT*)(buf+42);
+        if(d->op!=2)continue;
+        if(d->xid!=htonl(0xDEADBEEF))continue;
+        if(d->options[0]!=99||d->options[1]!=130)continue;
+        uint8_t mtype=0;
+        _dhcp_opt(d->options,64,53,&mtype,1);
+        if(mtype!=5)continue; /* not ACK */
+        net_my_ip=ntohl(d->yiaddr);
+        uint8_t tmp[4];
+        if(_dhcp_opt(d->options,64,1,tmp,4)==4)
+            net_netmask=((uint32_t)tmp[0]<<24)|((uint32_t)tmp[1]<<16)|((uint32_t)tmp[2]<<8)|tmp[3];
+        if(_dhcp_opt(d->options,64,3,tmp,4)==4)
+            net_gw_ip=((uint32_t)tmp[0]<<24)|((uint32_t)tmp[1]<<16)|((uint32_t)tmp[2]<<8)|tmp[3];
+        if(_dhcp_opt(d->options,64,6,tmp,4)==4)
+            net_dns_ip=((uint32_t)tmp[0]<<24)|((uint32_t)tmp[1]<<16)|((uint32_t)tmp[2]<<8)|tmp[3];
+        net_dhcp_ok=1;
+        return 1;
+    }
+    return 0;
+}
+
+int net_reconnect(void){
+    if(!_io)return 0;
+    net_dhcp_ok=0;
+    if(net_dhcp()&&arp_resolve(net_gw_ip,_gwmac)){net_ok=1;return 1;}
+    net_ok=0;return 0;
+}
+
+/* ---- ICMP ping ---- */
+int net_ping_gw(void){
+    if(!net_ok)return 0;
+    uint8_t fr[42];
+    EH*e=(EH*)fr;memcpy(e->d,_gwmac,6);memcpy(e->s,net_mac,6);e->t=htons(0x0800);
+    IH*ip=(IH*)(fr+14);
+    ip->ihl=0x45;ip->tos=0;ip->len=htons(28);
+    static uint16_t pid=400;ip->id=htons(pid++);ip->fl=0;
+    ip->ttl=64;ip->pr=1;ip->cs=0;ip->s=htonl(net_my_ip);ip->d=htonl(net_gw_ip);
+    ip->cs=cksum(ip,20);
+    ICH*ic=(ICH*)(fr+34);
+    ic->type=8;ic->code=0;ic->cs=0;ic->id=htons(0x1234);ic->seq=htons(1);
+    ic->cs=cksum(ic,8);
+    rtl_tx(fr,42);
+    uint8_t buf[256];
+    for(int i=0;i<1000000;i++){
+        uint16_t l=rtl_rx(buf,5);
+        if(l<42)continue;
+        EH*re=(EH*)buf;if(ntohs(re->t)!=0x0800)continue;
+        IH*ri=(IH*)(buf+14);if(ri->pr!=1)continue;
+        if(ntohl(ri->s)!=net_gw_ip)continue;
+        ICH*ric=(ICH*)(buf+34);
+        if(ric->type==0&&ntohs(ric->id)==0x1234)return 1;
+    }
+    return 0;
 }
 
 /* ---- Public API ---- */
 int net_init(void){
     if(!rtl_find())return 0;
     rtl_init();
-    if(!arp_resolve(GW_IP,_gwmac))return 0;
+    /* Try DHCP first; fall back to static defaults */
+    if(!net_dhcp()){
+        net_my_ip  =0x0A00020F;
+        net_gw_ip  =0x0A000202;
+        net_dns_ip =0x0A000203;
+        net_netmask=0xFFFFFF00;
+        net_dhcp_ok=0;
+    }
+    if(!arp_resolve(net_gw_ip,_gwmac))return 0;
     net_ok=1;return 1;
 }
 
 int net_http_get(const char*url,char*buf,int bsz){
     if(!net_ok)return -1;
-    /* Strip http:// */
     const char*p=url;
     if(p[0]=='h'&&p[4]==':'&&p[5]=='/'&&p[6]=='/')p+=7;
-    else if(p[0]=='h'&&p[5]==':'&&p[6]=='/'&&p[7]=='/')p+=8; /* https:// - try anyway */
-    /* Extract host */
+    else if(p[0]=='h'&&p[5]==':'&&p[6]=='/'&&p[7]=='/')p+=8;
     char host[128];int hl=0;
     while(*p&&*p!='/'&&hl<127)host[hl++]=*p++;
     host[hl]='\0';
     const char*path=(*p=='/')?p:"/";
-    /* Resolve */
     uint32_t ip;
     if(!dns_resolve(host,&ip)){
         int n=0;const char*e="Erreur: echec DNS pour ";
@@ -355,7 +517,6 @@ int net_http_get(const char*url,char*buf,int bsz){
         for(int i=0;host[i]&&n<bsz-1;i++)buf[n++]=host[i];
         buf[n]='\0';return n;
     }
-    /* Connect */
     if(!tcp_connect(ip,80)){
         const char*e="Erreur: connexion TCP echouee";
         int n=0;while(*e&&n<bsz-1)buf[n++]=*e++;

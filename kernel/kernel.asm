@@ -799,6 +799,612 @@ dispatch:
     test    eax, eax
     jnz     .reboot
 
+    ; --- whoami ---
+    mov     esi, cmd_buf
+    mov     edi, sc_whoami
+    call    seq
+    test    eax, eax
+    jnz     .whoami
+
+    ; --- id ---
+    mov     esi, cmd_buf
+    mov     edi, sc_id
+    call    seq
+    test    eax, eax
+    jnz     .id
+
+    ; --- hostname ---
+    mov     esi, cmd_buf
+    mov     edi, sc_hostname
+    call    seq
+    test    eax, eax
+    jnz     .hostname
+
+    ; --- arch ---
+    mov     esi, cmd_buf
+    mov     edi, sc_arch
+    call    seq
+    test    eax, eax
+    jnz     .arch
+
+    ; --- date ---
+    mov     esi, cmd_buf
+    mov     edi, sc_date
+    call    seq
+    test    eax, eax
+    jnz     .date_cmd
+
+    ; --- pwd ---
+    mov     esi, cmd_buf
+    mov     edi, sc_pwd
+    call    seq
+    test    eax, eax
+    jnz     .pwd
+
+    ; --- ls / ll / dir ---
+    mov     esi, cmd_buf
+    mov     edi, sc_ls
+    call    seq
+    test    eax, eax
+    jnz     .ls
+    mov     esi, cmd_buf
+    mov     edi, sc_ls_pfx
+    call    spfx
+    test    eax, eax
+    jnz     .ls
+    mov     esi, cmd_buf
+    mov     edi, sc_ll
+    call    seq
+    test    eax, eax
+    jnz     .ls
+    mov     esi, cmd_buf
+    mov     edi, sc_dir
+    call    seq
+    test    eax, eax
+    jnz     .ls
+
+    ; --- cat specifique ---
+    mov     esi, cmd_buf
+    mov     edi, sc_cat_cpu
+    call    seq
+    test    eax, eax
+    jnz     .cat_cpu
+    mov     esi, cmd_buf
+    mov     edi, sc_cat_mem
+    call    seq
+    test    eax, eax
+    jnz     .cat_mem
+    mov     esi, cmd_buf
+    mov     edi, sc_cat_host
+    call    seq
+    test    eax, eax
+    jnz     .cat_host
+    mov     esi, cmd_buf
+    mov     edi, sc_cat_osr
+    call    seq
+    test    eax, eax
+    jnz     .cat_osr
+    mov     esi, cmd_buf
+    mov     edi, sc_cat_ver
+    call    seq
+    test    eax, eax
+    jnz     .cat_ver
+    ; generic cat
+    mov     esi, cmd_buf
+    mov     edi, sc_cat_pfx
+    call    spfx
+    test    eax, eax
+    jnz     .cat_gen
+
+    ; --- ps ---
+    mov     esi, cmd_buf
+    mov     edi, sc_ps
+    call    seq
+    test    eax, eax
+    jnz     .ps
+
+    ; --- top ---
+    mov     esi, cmd_buf
+    mov     edi, sc_top
+    call    seq
+    test    eax, eax
+    jnz     .top
+
+    ; --- free ---
+    mov     esi, cmd_buf
+    mov     edi, sc_free
+    call    seq
+    test    eax, eax
+    jnz     .free
+
+    ; --- df ---
+    mov     esi, cmd_buf
+    mov     edi, sc_df
+    call    seq
+    test    eax, eax
+    jnz     .df
+
+    ; --- dmesg ---
+    mov     esi, cmd_buf
+    mov     edi, sc_dmesg
+    call    seq
+    test    eax, eax
+    jnz     .dmesg
+
+    ; --- lscpu ---
+    mov     esi, cmd_buf
+    mov     edi, sc_lscpu
+    call    seq
+    test    eax, eax
+    jnz     .lscpu
+
+    ; --- lspci ---
+    mov     esi, cmd_buf
+    mov     edi, sc_lspci
+    call    seq
+    test    eax, eax
+    jnz     .lspci
+
+    ; --- lsblk ---
+    mov     esi, cmd_buf
+    mov     edi, sc_lsblk
+    call    seq
+    test    eax, eax
+    jnz     .lsblk
+
+    ; --- lsusb ---
+    mov     esi, cmd_buf
+    mov     edi, sc_lsusb
+    call    seq
+    test    eax, eax
+    jnz     .lsusb
+
+    ; --- lsmod ---
+    mov     esi, cmd_buf
+    mov     edi, sc_lsmod
+    call    seq
+    test    eax, eax
+    jnz     .lsmod
+
+    ; --- mem ---
+    mov     esi, cmd_buf
+    mov     edi, sc_mem
+    call    seq
+    test    eax, eax
+    jnz     .mem
+
+    ; --- mount ---
+    mov     esi, cmd_buf
+    mov     edi, sc_mount
+    call    seq
+    test    eax, eax
+    jnz     .mount
+
+    ; --- env ---
+    mov     esi, cmd_buf
+    mov     edi, sc_env
+    call    seq
+    test    eax, eax
+    jnz     .env
+
+    ; --- ifconfig / net ---
+    mov     esi, cmd_buf
+    mov     edi, sc_ifc
+    call    seq
+    test    eax, eax
+    jnz     .ifconfig
+    mov     esi, cmd_buf
+    mov     edi, sc_net
+    call    seq
+    test    eax, eax
+    jnz     .ifconfig
+
+    ; --- netstat ---
+    mov     esi, cmd_buf
+    mov     edi, sc_netstat
+    call    seq
+    test    eax, eax
+    jnz     .netstat
+
+    ; --- ping ---
+    mov     esi, cmd_buf
+    mov     edi, sc_ping
+    call    seq
+    test    eax, eax
+    jnz     .ping
+    mov     esi, cmd_buf
+    mov     edi, sc_ping_pfx
+    call    spfx
+    test    eax, eax
+    jnz     .ping
+
+    ; --- about ---
+    mov     esi, cmd_buf
+    mov     edi, sc_about
+    call    seq
+    test    eax, eax
+    jnz     .about
+
+    ; --- fortune ---
+    mov     esi, cmd_buf
+    mov     edi, sc_fortune
+    call    seq
+    test    eax, eax
+    jnz     .fortune
+
+    ; --- cowsay ---
+    mov     esi, cmd_buf
+    mov     edi, sc_cowsay
+    call    seq
+    test    eax, eax
+    jnz     .cowsay
+    mov     esi, cmd_buf
+    mov     edi, sc_cowsay_pfx
+    call    spfx
+    test    eax, eax
+    jnz     .cowsay
+
+    ; --- matrix ---
+    mov     esi, cmd_buf
+    mov     edi, sc_matrix
+    call    seq
+    test    eax, eax
+    jnz     .matrix
+
+    ; --- sl ---
+    mov     esi, cmd_buf
+    mov     edi, sc_sl
+    call    seq
+    test    eax, eax
+    jnz     .sl
+
+    ; --- creeper ---
+    mov     esi, cmd_buf
+    mov     edi, sc_creeper
+    call    seq
+    test    eax, eax
+    jnz     .creeper
+
+    ; --- true ---
+    mov     esi, cmd_buf
+    mov     edi, sc_true
+    call    seq
+    test    eax, eax
+    jnz     .done
+
+    ; --- false ---
+    mov     esi, cmd_buf
+    mov     edi, sc_false
+    call    seq
+    test    eax, eax
+    jnz     .cmd_false
+
+    ; --- exit / logout ---
+    mov     esi, cmd_buf
+    mov     edi, sc_exit
+    call    seq
+    test    eax, eax
+    jnz     .exit
+    mov     esi, cmd_buf
+    mov     edi, sc_logout
+    call    seq
+    test    eax, eax
+    jnz     .exit
+
+    ; --- shutdown / poweroff / halt ---
+    mov     esi, cmd_buf
+    mov     edi, sc_shutdown
+    call    seq
+    test    eax, eax
+    jnz     .reboot
+    mov     esi, cmd_buf
+    mov     edi, sc_poweroff
+    call    seq
+    test    eax, eax
+    jnz     .reboot
+    mov     esi, cmd_buf
+    mov     edi, sc_halt_cmd
+    call    seq
+    test    eax, eax
+    jnz     .reboot
+
+    ; --- sudo / su ---
+    mov     esi, cmd_buf
+    mov     edi, sc_sudo
+    call    seq
+    test    eax, eax
+    jnz     .sudo
+    mov     esi, cmd_buf
+    mov     edi, sc_sudo_pfx
+    call    spfx
+    test    eax, eax
+    jnz     .sudo
+    mov     esi, cmd_buf
+    mov     edi, sc_su
+    call    seq
+    test    eax, eax
+    jnz     .sudo
+
+    ; --- bash / sh / zsh ---
+    mov     esi, cmd_buf
+    mov     edi, sc_bash
+    call    seq
+    test    eax, eax
+    jnz     .shell_msg
+    mov     esi, cmd_buf
+    mov     edi, sc_sh
+    call    seq
+    test    eax, eax
+    jnz     .shell_msg
+    mov     esi, cmd_buf
+    mov     edi, sc_zsh
+    call    seq
+    test    eax, eax
+    jnz     .shell_msg
+
+    ; --- sync ---
+    mov     esi, cmd_buf
+    mov     edi, sc_sync
+    call    seq
+    test    eax, eax
+    jnz     .done
+
+    ; --- history ---
+    mov     esi, cmd_buf
+    mov     edi, sc_history
+    call    seq
+    test    eax, eax
+    jnz     .history
+
+    ; --- cal ---
+    mov     esi, cmd_buf
+    mov     edi, sc_cal
+    call    seq
+    test    eax, eax
+    jnz     .cal
+
+    ; --- cls (alias clear) ---
+    mov     esi, cmd_buf
+    mov     edi, sc_cls
+    call    seq
+    test    eax, eax
+    jnz     .clear
+
+    ; --- time ---
+    mov     esi, cmd_buf
+    mov     edi, sc_time
+    call    seq
+    test    eax, eax
+    jnz     .time_cmd
+
+    ; --- sleep ---
+    mov     esi, cmd_buf
+    mov     edi, sc_sleep
+    call    seq
+    test    eax, eax
+    jnz     .sleep_cmd
+    mov     esi, cmd_buf
+    mov     edi, sc_sleep_pfx
+    call    spfx
+    test    eax, eax
+    jnz     .sleep_cmd
+
+    ; --- banner ---
+    mov     esi, cmd_buf
+    mov     edi, sc_banner
+    call    seq
+    test    eax, eax
+    jnz     .banner_gen
+    mov     esi, cmd_buf
+    mov     edi, sc_banner_pfx
+    call    spfx
+    test    eax, eax
+    jnz     .banner_gen
+
+    ; --- man / info ---
+    mov     esi, cmd_buf
+    mov     edi, sc_man_pfx
+    call    spfx
+    test    eax, eax
+    jnz     .man_cmd
+
+    ; --- which ---
+    mov     esi, cmd_buf
+    mov     edi, sc_which_pfx
+    call    spfx
+    test    eax, eax
+    jnz     .which_cmd
+
+    ; --- kill / killall ---
+    mov     esi, cmd_buf
+    mov     edi, sc_kill_pfx
+    call    spfx
+    test    eax, eax
+    jnz     .kill_cmd
+
+    ; --- mkdir ---
+    mov     esi, cmd_buf
+    mov     edi, sc_mkdir_pfx
+    call    spfx
+    test    eax, eax
+    jnz     .mkdir_cmd
+
+    ; --- touch ---
+    mov     esi, cmd_buf
+    mov     edi, sc_touch_pfx
+    call    spfx
+    test    eax, eax
+    jnz     .touch_cmd
+
+    ; --- rm / rmdir ---
+    mov     esi, cmd_buf
+    mov     edi, sc_rm_pfx
+    call    spfx
+    test    eax, eax
+    jnz     .rm_cmd
+
+    ; --- cp ---
+    mov     esi, cmd_buf
+    mov     edi, sc_cp_pfx
+    call    spfx
+    test    eax, eax
+    jnz     .cp_cmd
+
+    ; --- mv ---
+    mov     esi, cmd_buf
+    mov     edi, sc_mv_pfx
+    call    spfx
+    test    eax, eax
+    jnz     .mv_cmd
+
+    ; --- chmod / chown ---
+    mov     esi, cmd_buf
+    mov     edi, sc_chmod_pfx
+    call    spfx
+    test    eax, eax
+    jnz     .done
+    mov     esi, cmd_buf
+    mov     edi, sc_chown_pfx
+    call    spfx
+    test    eax, eax
+    jnz     .done
+
+    ; --- grep ---
+    mov     esi, cmd_buf
+    mov     edi, sc_grep_pfx
+    call    spfx
+    test    eax, eax
+    jnz     .grep_cmd
+    mov     esi, cmd_buf
+    mov     edi, sc_grep
+    call    seq
+    test    eax, eax
+    jnz     .grep_cmd
+
+    ; --- find ---
+    mov     esi, cmd_buf
+    mov     edi, sc_find_pfx
+    call    spfx
+    test    eax, eax
+    jnz     .find_cmd
+    mov     esi, cmd_buf
+    mov     edi, sc_find
+    call    seq
+    test    eax, eax
+    jnz     .find_cmd
+
+    ; --- du ---
+    mov     esi, cmd_buf
+    mov     edi, sc_du_pfx
+    call    spfx
+    test    eax, eax
+    jnz     .du_cmd
+    mov     esi, cmd_buf
+    mov     edi, sc_du
+    call    seq
+    test    eax, eax
+    jnz     .du_cmd
+
+    ; --- stat ---
+    mov     esi, cmd_buf
+    mov     edi, sc_stat_pfx
+    call    spfx
+    test    eax, eax
+    jnz     .stat_cmd
+
+    ; --- file ---
+    mov     esi, cmd_buf
+    mov     edi, sc_file_pfx
+    call    spfx
+    test    eax, eax
+    jnz     .file_cmd
+
+    ; --- strace / ltrace / gdb / valgrind ---
+    mov     esi, cmd_buf
+    mov     edi, sc_strace_pfx
+    call    spfx
+    test    eax, eax
+    jnz     .nosupport
+    mov     esi, cmd_buf
+    mov     edi, sc_gdb_pfx
+    call    spfx
+    test    eax, eax
+    jnz     .nosupport
+
+    ; --- make / gcc / nasm ---
+    mov     esi, cmd_buf
+    mov     edi, sc_make_pfx
+    call    spfx
+    test    eax, eax
+    jnz     .nosupport2
+    mov     esi, cmd_buf
+    mov     edi, sc_gcc_pfx
+    call    spfx
+    test    eax, eax
+    jnz     .nosupport2
+
+    ; --- curl / wget ---
+    mov     esi, cmd_buf
+    mov     edi, sc_curl_pfx
+    call    spfx
+    test    eax, eax
+    jnz     .nosupport3
+    mov     esi, cmd_buf
+    mov     edi, sc_wget_pfx
+    call    spfx
+    test    eax, eax
+    jnz     .nosupport3
+
+    ; --- ssh / ftp ---
+    mov     esi, cmd_buf
+    mov     edi, sc_ssh_pfx
+    call    spfx
+    test    eax, eax
+    jnz     .nosupport4
+
+    ; --- echo sans args ---
+    mov     esi, cmd_buf
+    mov     edi, sc_echo_bare
+    call    seq
+    test    eax, eax
+    jnz     .echo_nl
+
+    ; --- head / tail ---
+    mov     esi, cmd_buf
+    mov     edi, sc_head_pfx
+    call    spfx
+    test    eax, eax
+    jnz     .cat_gen
+    mov     esi, cmd_buf
+    mov     edi, sc_tail_pfx
+    call    spfx
+    test    eax, eax
+    jnz     .cat_gen
+
+    ; --- wc ---
+    mov     esi, cmd_buf
+    mov     edi, sc_wc_pfx
+    call    spfx
+    test    eax, eax
+    jnz     .wc_cmd
+
+    ; --- sort / uniq / cut / tr / sed / awk ---
+    mov     esi, cmd_buf
+    mov     edi, sc_sort_pfx
+    call    spfx
+    test    eax, eax
+    jnz     .stdin_cmd
+    mov     esi, cmd_buf
+    mov     edi, sc_sed_pfx
+    call    spfx
+    test    eax, eax
+    jnz     .stdin_cmd
+    mov     esi, cmd_buf
+    mov     edi, sc_awk_pfx
+    call    spfx
+    test    eax, eax
+    jnz     .stdin_cmd
+
     ; Inconnu
     mov     byte [vga_attr], A_RED
     mov     esi, s_unk
@@ -881,6 +1487,399 @@ dispatch:
     mov     al,  0xFE
     out     0x64, al
     jmp     $
+
+.whoami:
+    mov     esi, s_whoami
+    call    vga_puts
+    jmp     .done
+
+.id:
+    mov     esi, s_id
+    call    vga_puts
+    jmp     .done
+
+.hostname:
+    mov     esi, s_hostname_out
+    call    vga_puts
+    jmp     .done
+
+.arch:
+    mov     esi, s_arch
+    call    vga_puts
+    jmp     .done
+
+.date_cmd:
+    mov     byte [vga_attr], A_CYAN
+    mov     esi, s_date
+    call    vga_puts
+    mov     byte [vga_attr], A_OUT
+    jmp     .done
+
+.pwd:
+    mov     esi, s_pwd
+    call    vga_puts
+    jmp     .done
+
+.ls:
+    mov     byte [vga_attr], A_GREEN
+    mov     esi, s_ls
+    call    vga_puts
+    mov     byte [vga_attr], A_OUT
+    jmp     .done
+
+.cat_cpu:
+    mov     esi, s_cat_cpu
+    call    vga_puts
+    jmp     .done
+
+.cat_mem:
+    mov     esi, s_cat_mem
+    call    vga_puts
+    jmp     .done
+
+.cat_host:
+    mov     esi, s_hostname_out
+    call    vga_puts
+    jmp     .done
+
+.cat_osr:
+    mov     esi, s_cat_osr
+    call    vga_puts
+    jmp     .done
+
+.cat_ver:
+    mov     esi, s_cat_ver
+    call    vga_puts
+    jmp     .done
+
+.cat_gen:
+    mov     esi, s_cat_gen
+    call    vga_puts
+    jmp     .done
+
+.ps:
+    mov     byte [vga_attr], A_CYAN
+    mov     esi, s_ps
+    call    vga_puts
+    mov     byte [vga_attr], A_OUT
+    jmp     .done
+
+.top:
+    mov     byte [vga_attr], A_GREEN
+    mov     esi, s_top
+    call    vga_puts
+    mov     byte [vga_attr], A_OUT
+    jmp     .done
+
+.free:
+    mov     esi, s_free_out
+    call    vga_puts
+    jmp     .done
+
+.df:
+    mov     esi, s_df
+    call    vga_puts
+    jmp     .done
+
+.dmesg:
+    mov     byte [vga_attr], A_GREEN
+    mov     esi, s_dmesg
+    call    vga_puts
+    mov     byte [vga_attr], A_OUT
+    jmp     .done
+
+.lscpu:
+    mov     esi, s_lscpu
+    call    vga_puts
+    jmp     .done
+
+.lspci:
+    mov     esi, s_lspci
+    call    vga_puts
+    jmp     .done
+
+.lsblk:
+    mov     esi, s_lsblk
+    call    vga_puts
+    jmp     .done
+
+.lsusb:
+    mov     esi, s_lsusb
+    call    vga_puts
+    jmp     .done
+
+.lsmod:
+    mov     esi, s_lsmod
+    call    vga_puts
+    jmp     .done
+
+.mem:
+    mov     byte [vga_attr], A_CYAN
+    mov     esi, s_mem
+    call    vga_puts
+    mov     byte [vga_attr], A_OUT
+    jmp     .done
+
+.mount:
+    mov     esi, s_mount
+    call    vga_puts
+    jmp     .done
+
+.env:
+    mov     esi, s_env
+    call    vga_puts
+    jmp     .done
+
+.ifconfig:
+    mov     byte [vga_attr], A_CYAN
+    mov     esi, s_ifconfig
+    call    vga_puts
+    mov     byte [vga_attr], A_OUT
+    jmp     .done
+
+.netstat:
+    mov     esi, s_netstat
+    call    vga_puts
+    jmp     .done
+
+.ping:
+    mov     byte [vga_attr], A_GREEN
+    mov     esi, s_ping
+    call    vga_puts
+    mov     byte [vga_attr], A_OUT
+    jmp     .done
+
+.about:
+    mov     byte [vga_attr], A_CYAN
+    mov     esi, s_about
+    call    vga_puts
+    mov     byte [vga_attr], A_OUT
+    jmp     .done
+
+.fortune:
+    mov     eax, [fortune_idx]
+    mov     esi, [fort_table + eax*4]
+    call    vga_puts
+    inc     dword [fortune_idx]
+    mov     eax, [fortune_idx]
+    cmp     eax, 8
+    jl      .done
+    mov     dword [fortune_idx], 0
+    jmp     .done
+
+.cowsay:
+    mov     byte [vga_attr], A_GREEN
+    mov     esi, s_cowsay
+    call    vga_puts
+    mov     byte [vga_attr], A_OUT
+    jmp     .done
+
+.matrix:
+    mov     byte [vga_attr], A_GREEN
+    mov     esi, s_matrix
+    call    vga_puts
+    mov     byte [vga_attr], A_OUT
+    jmp     .done
+
+.sl:
+    mov     byte [vga_attr], A_WHITE
+    mov     esi, s_sl
+    call    vga_puts
+    mov     byte [vga_attr], A_OUT
+    jmp     .done
+
+.creeper:
+    mov     byte [vga_attr], A_GREEN
+    mov     esi, s_creeper
+    call    vga_puts
+    mov     byte [vga_attr], A_OUT
+    jmp     .done
+
+.cmd_false:
+    mov     byte [vga_attr], A_RED
+    mov     esi, s_false_out
+    call    vga_puts
+    mov     byte [vga_attr], A_OUT
+    jmp     .done
+
+.exit:
+    mov     esi, s_exit
+    call    vga_puts
+    jmp     .done
+
+.sudo:
+    mov     byte [vga_attr], A_GREEN
+    mov     esi, s_sudo
+    call    vga_puts
+    mov     byte [vga_attr], A_OUT
+    jmp     .done
+
+.shell_msg:
+    mov     esi, s_shell
+    call    vga_puts
+    jmp     .done
+
+.history:
+    mov     esi, s_history
+    call    vga_puts
+    jmp     .done
+
+.cal:
+    mov     byte [vga_attr], A_CYAN
+    mov     esi, s_cal
+    call    vga_puts
+    mov     byte [vga_attr], A_OUT
+    jmp     .done
+
+.time_cmd:
+    mov     byte [vga_attr], A_CYAN
+    mov     esi, s_time
+    call    vga_puts
+    ; affiche ticks comme uptime
+    mov     eax, [ticks]
+    mov     ebx, 100
+    xor     edx, edx
+    div     ebx
+    call    vga_putn
+    mov     esi, s_sec
+    call    vga_puts
+    mov     byte [vga_attr], A_OUT
+    jmp     .done
+
+.sleep_cmd:
+    mov     ecx, 0x2000000
+.slp_lp:
+    loop    .slp_lp
+    jmp     .done
+
+.banner_gen:
+    mov     byte [vga_attr], A_WHITE
+    mov     esi, s_banner
+    call    vga_puts
+    mov     byte [vga_attr], A_OUT
+    jmp     .done
+
+.man_cmd:
+    mov     esi, s_man
+    call    vga_puts
+    jmp     .done
+
+.which_cmd:
+    mov     esi, s_which
+    call    vga_puts
+    jmp     .done
+
+.kill_cmd:
+    mov     byte [vga_attr], A_RED
+    mov     esi, s_kill
+    call    vga_puts
+    mov     byte [vga_attr], A_OUT
+    jmp     .done
+
+.mkdir_cmd:
+    mov     byte [vga_attr], A_GREEN
+    mov     esi, s_mkdir
+    call    vga_puts
+    mov     byte [vga_attr], A_OUT
+    jmp     .done
+
+.touch_cmd:
+    mov     byte [vga_attr], A_GREEN
+    mov     esi, s_touch
+    call    vga_puts
+    mov     byte [vga_attr], A_OUT
+    jmp     .done
+
+.rm_cmd:
+    mov     byte [vga_attr], A_RED
+    mov     esi, s_rm
+    call    vga_puts
+    mov     byte [vga_attr], A_OUT
+    jmp     .done
+
+.cp_cmd:
+    mov     byte [vga_attr], A_GREEN
+    mov     esi, s_cp
+    call    vga_puts
+    mov     byte [vga_attr], A_OUT
+    jmp     .done
+
+.mv_cmd:
+    mov     byte [vga_attr], A_GREEN
+    mov     esi, s_mv
+    call    vga_puts
+    mov     byte [vga_attr], A_OUT
+    jmp     .done
+
+.grep_cmd:
+    mov     esi, s_grep
+    call    vga_puts
+    jmp     .done
+
+.find_cmd:
+    mov     byte [vga_attr], A_CYAN
+    mov     esi, s_find_out
+    call    vga_puts
+    mov     byte [vga_attr], A_OUT
+    jmp     .done
+
+.du_cmd:
+    mov     esi, s_du
+    call    vga_puts
+    jmp     .done
+
+.stat_cmd:
+    mov     esi, s_stat
+    call    vga_puts
+    jmp     .done
+
+.file_cmd:
+    mov     esi, s_file
+    call    vga_puts
+    jmp     .done
+
+.nosupport:
+    mov     byte [vga_attr], A_RED
+    mov     esi, s_nosupport
+    call    vga_puts
+    mov     byte [vga_attr], A_OUT
+    jmp     .done
+
+.nosupport2:
+    mov     byte [vga_attr], A_RED
+    mov     esi, s_nosupport2
+    call    vga_puts
+    mov     byte [vga_attr], A_OUT
+    jmp     .done
+
+.nosupport3:
+    mov     byte [vga_attr], A_RED
+    mov     esi, s_nosupport3
+    call    vga_puts
+    mov     byte [vga_attr], A_OUT
+    jmp     .done
+
+.nosupport4:
+    mov     byte [vga_attr], A_RED
+    mov     esi, s_nosupport4
+    call    vga_puts
+    mov     byte [vga_attr], A_OUT
+    jmp     .done
+
+.echo_nl:
+    mov     al, 10
+    call    vga_putc
+    jmp     .done
+
+.wc_cmd:
+    mov     esi, s_wc
+    call    vga_puts
+    jmp     .done
+
+.stdin_cmd:
+    mov     esi, s_stdin
+    call    vga_puts
+    jmp     .done
 
 .done:
     ret
@@ -1394,7 +2393,7 @@ s_mfich   db ' Fichier ', 0
 s_moutils db ' Outils ', 0
 s_maide   db ' Aide ', 0
 s_uplab   db 'Up:', 0
-s_status  db ' help  clear  echo  color  uptime  uname  gfx  reboot', 0
+s_status  db ' help ls ps top df dmesg ifconfig ping fortune cowsay cal about reboot', 0
 s_wintitle db ' Terminal - root@myos:/ ', 0
 s_welcome  db 'MyOS v2.0 - Kernel x86 32bit ASM pur', 10, 0
 s_hint     db 'Tape "help" pour les commandes.', 10, 10, 0
@@ -1409,15 +2408,25 @@ s_colok    db 'Couleur changee.', 10, 0
 s_rbt      db 'Reboot...', 10, 0
 s_uname    db 'MyOS 2.0 x86 32-bit - 0 ligne de C - ASM pur', 10, 0
 s_help:
-    db '--- Commandes ---', 10
-    db '  help           cette aide', 10
-    db '  clear          redessine le bureau', 10
-    db '  echo [texte]   affiche du texte', 10
-    db '  color [0-15]   couleur texte', 10
-    db '  uptime         temps depuis boot', 10
-    db '  uname          info systeme', 10
-    db '  gfx            demo 16 couleurs VGA', 10
-    db '  reboot         redemarrage', 10, 0
+    db '--- MyOS v2.0 Commandes Kernel ---', 10
+    db 'Fichiers:', 10
+    db '  ls ll dir pwd  lister / repertoire', 10
+    db '  cat [fichier]  afficher fichier', 10
+    db '  mkdir touch rm cp mv stat file', 10
+    db '  find grep chmod chown', 10
+    db 'Systeme:', 10
+    db '  uname arch whoami id hostname date', 10
+    db '  time uptime ps top kill free df du', 10
+    db '  mem mount dmesg lscpu lspci lsblk', 10
+    db '  lsusb lsmod env sync history', 10
+    db 'Reseau:', 10
+    db '  ifconfig net netstat ping', 10
+    db 'Affichage:', 10
+    db '  echo color clear cls gfx banner', 10
+    db '  fortune cowsay matrix sl creeper cal', 10
+    db 'Shell:', 10
+    db '  man which sudo su bash exit about', 10
+    db '  sleep reboot shutdown poweroff', 10, 0
 
 sc_help   db 'help', 0
 sc_clear  db 'clear', 0
@@ -1427,6 +2436,350 @@ sc_up     db 'uptime', 0
 sc_uname  db 'uname', 0
 sc_gfx    db 'gfx', 0
 sc_reboot db 'reboot', 0
+
+; --- Commandes supplementaires ---
+sc_whoami    db 'whoami', 0
+sc_id        db 'id', 0
+sc_hostname  db 'hostname', 0
+sc_arch      db 'arch', 0
+sc_date      db 'date', 0
+sc_pwd       db 'pwd', 0
+sc_ls        db 'ls', 0
+sc_ls_pfx    db 'ls ', 0
+sc_ll        db 'll', 0
+sc_dir       db 'dir', 0
+sc_cat_cpu   db 'cat /proc/cpuinfo', 0
+sc_cat_mem   db 'cat /proc/meminfo', 0
+sc_cat_host  db 'cat /etc/hostname', 0
+sc_cat_osr   db 'cat /etc/os-release', 0
+sc_cat_ver   db 'cat /proc/version', 0
+sc_cat_pfx   db 'cat ', 0
+sc_ps        db 'ps', 0
+sc_top       db 'top', 0
+sc_free      db 'free', 0
+sc_df        db 'df', 0
+sc_dmesg     db 'dmesg', 0
+sc_lscpu     db 'lscpu', 0
+sc_lspci     db 'lspci', 0
+sc_lsblk     db 'lsblk', 0
+sc_lsusb     db 'lsusb', 0
+sc_lsmod     db 'lsmod', 0
+sc_mem       db 'mem', 0
+sc_mount     db 'mount', 0
+sc_env       db 'env', 0
+sc_ifc       db 'ifconfig', 0
+sc_net       db 'net', 0
+sc_netstat   db 'netstat', 0
+sc_ping      db 'ping', 0
+sc_ping_pfx  db 'ping ', 0
+sc_about     db 'about', 0
+sc_fortune   db 'fortune', 0
+sc_cowsay    db 'cowsay', 0
+sc_cowsay_pfx db 'cowsay ', 0
+sc_matrix    db 'matrix', 0
+sc_sl        db 'sl', 0
+sc_creeper   db 'creeper', 0
+sc_true      db 'true', 0
+sc_false     db 'false', 0
+sc_exit      db 'exit', 0
+sc_logout    db 'logout', 0
+sc_shutdown  db 'shutdown', 0
+sc_poweroff  db 'poweroff', 0
+sc_halt_cmd  db 'halt', 0
+sc_sudo      db 'sudo', 0
+sc_sudo_pfx  db 'sudo ', 0
+sc_su        db 'su', 0
+sc_bash      db 'bash', 0
+sc_sh        db 'sh', 0
+sc_zsh       db 'zsh', 0
+sc_sync      db 'sync', 0
+sc_history   db 'history', 0
+sc_cal       db 'cal', 0
+sc_cls       db 'cls', 0
+sc_time      db 'time', 0
+sc_sleep     db 'sleep', 0
+sc_sleep_pfx db 'sleep ', 0
+sc_banner    db 'banner', 0
+sc_banner_pfx db 'banner ', 0
+sc_man_pfx   db 'man ', 0
+sc_which_pfx db 'which ', 0
+sc_kill_pfx  db 'kill ', 0
+sc_mkdir_pfx db 'mkdir ', 0
+sc_touch_pfx db 'touch ', 0
+sc_rm_pfx    db 'rm ', 0
+sc_cp_pfx    db 'cp ', 0
+sc_mv_pfx    db 'mv ', 0
+sc_chmod_pfx db 'chmod ', 0
+sc_chown_pfx db 'chown ', 0
+sc_grep_pfx  db 'grep ', 0
+sc_grep      db 'grep', 0
+sc_find_pfx  db 'find ', 0
+sc_find      db 'find', 0
+sc_du_pfx    db 'du ', 0
+sc_du        db 'du', 0
+sc_stat_pfx  db 'stat ', 0
+sc_file_pfx  db 'file ', 0
+sc_strace_pfx db 'strace', 0
+sc_gdb_pfx   db 'gdb', 0
+sc_make_pfx  db 'make', 0
+sc_gcc_pfx   db 'gcc', 0
+sc_curl_pfx  db 'curl', 0
+sc_wget_pfx  db 'wget', 0
+sc_ssh_pfx   db 'ssh', 0
+sc_echo_bare db 'echo', 0
+sc_head_pfx  db 'head ', 0
+sc_tail_pfx  db 'tail ', 0
+sc_wc_pfx    db 'wc ', 0
+sc_sort_pfx  db 'sort', 0
+sc_sed_pfx   db 'sed ', 0
+sc_awk_pfx   db 'awk ', 0
+
+; Reponses des nouvelles commandes
+s_whoami     db 'root', 10, 0
+s_id         db 'uid=0(root) gid=0(root) groups=0(root)', 10, 0
+s_hostname_out db 'myos.epitech.eu', 10, 0
+s_arch       db 'i386', 10, 0
+s_date       db 'Mer 21 Mai 2026 00:00:00 CET', 10, 0
+s_pwd        db '/', 10, 0
+s_ls:
+    db 'drwxr-xr-x  bin/', 10
+    db 'drwxr-xr-x  boot/', 10
+    db 'drwxr-xr-x  dev/', 10
+    db 'drwxr-xr-x  etc/', 10
+    db 'drwxr-xr-x  home/', 10
+    db 'drwxr-xr-x  lib/', 10
+    db 'drwxr-xr-x  proc/', 10
+    db 'drwxr-xr-x  sys/', 10
+    db 'drwxr-xr-x  tmp/', 10
+    db 'drwxr-xr-x  usr/', 10
+    db 'drwxr-xr-x  var/', 10, 0
+s_cat_cpu:
+    db 'processor  : 0', 10
+    db 'vendor_id  : GenuineIntel', 10
+    db 'model name : i386 MyOS CPU @ 1GHz', 10
+    db 'cpu MHz    : 1000.000', 10
+    db 'cache size : 256 KB', 10, 0
+s_cat_mem:
+    db 'MemTotal:    131072 kB', 10
+    db 'MemFree:      98304 kB', 10
+    db 'Buffers:       4096 kB', 10
+    db 'Cached:        8192 kB', 10, 0
+s_cat_osr:
+    db 'NAME="MyOS"', 10
+    db 'VERSION="2.0 Epitech"', 10
+    db 'ID=myos', 10
+    db 'HOME_URL=https://epitech.eu', 10, 0
+s_cat_ver:
+    db 'MyOS version 2.0 (gcc 12.2.0) #1 SMP 2026', 10, 0
+s_cat_gen:
+    db '(fichier binaire ou non accessible)', 10, 0
+s_ps:
+    db '  PID TTY  STAT CMD', 10
+    db '    1 ?    Ss   init', 10
+    db '    2 ?    S    kthreadd', 10
+    db '    3 ?    S    kmain', 10
+    db '   10 tty0 R    sh', 10
+    db '   11 tty0 R+   ps', 10, 0
+s_top:
+    db 'Tasks:  5 total, 1 running', 10
+    db 'CPU:  0.1%us  0.0%sy', 10
+    db 'Mem: 131072k total, 32768k used, 98304k free', 10, 10
+    db '  PID  %CPU  %MEM  CMD', 10
+    db '    1   0.0   0.0  init', 10
+    db '    3   0.0   0.5  kmain', 10
+    db '   10   0.1   0.0  sh', 10, 0
+s_free_out:
+    db '              total    used    free', 10
+    db 'Mem:         131072   32768   98304', 10
+    db 'Swap:             0       0       0', 10, 0
+s_df:
+    db 'Filesystem   Size  Used Avail Use%', 10
+    db '/dev/hda     1.4M  890K  510K  64%', 10
+    db 'tmpfs         64M    0K   64M   0%', 10, 0
+s_dmesg:
+    db '[    0.000] MyOS kernel started', 10
+    db '[    0.001] Protected mode active (GDT ok)', 10
+    db '[    0.002] IDT installed, IRQs configured', 10
+    db '[    0.003] VESA VBE 640x480 24bpp init', 10
+    db '[    0.004] PS/2 keyboard driver loaded', 10
+    db '[    0.005] PS/2 mouse driver loaded', 10
+    db '[    0.006] PIC remapped: IRQ0-7 -> 0x20', 10
+    db '[    0.007] PIT channel 0 @ 100Hz', 10
+    db '[    0.008] PCI bus scan: 5 devices found', 10
+    db '[    0.009] RTL8139 Ethernet at 00:03.0', 10
+    db '[    0.010] MineGRUB handoff complete', 10, 0
+s_lscpu:
+    db 'Architecture:  i386', 10
+    db 'CPU op-mode:   32-bit', 10
+    db 'CPU(s):        1', 10
+    db 'Vendor ID:     GenuineIntel', 10
+    db 'Model name:    i386 compatible @ 1GHz', 10
+    db 'CPU MHz:       1000.000', 10
+    db 'L1d cache:     16K', 10
+    db 'L2 cache:      256K', 10
+    db 'Flags:         fpu pse pae mce mtrr pge', 10, 0
+s_lspci:
+    db '00:00.0 Host bridge: Intel i440FX', 10
+    db '00:01.0 ISA bridge : Intel PIIX3', 10
+    db '00:02.0 VGA compat : Standard VESA', 10
+    db '00:03.0 Ethernet   : Realtek RTL8139', 10
+    db '00:04.0 Audio      : Intel AC97', 10, 0
+s_lsblk:
+    db 'NAME  SIZE TYPE MOUNTPOINT', 10
+    db 'hda   1.4M disk /', 10
+    db 'fd0   1.4M disk', 10, 0
+s_lsusb:
+    db 'Bus 001 Device 001: ID 8086:7020 UHCI Root Hub', 10, 0
+s_lsmod:
+    db 'Module        Size  Used by', 10
+    db 'rtl8139       8192  0', 10
+    db 'ps2kbd        4096  0', 10
+    db 'ps2mouse      4096  0', 10
+    db 'vesa          8192  0', 10
+    db 'pit_timer     4096  0', 10, 0
+s_mem:
+    db 'Carte memoire:', 10
+    db '  0x000000-0x0004FF  IVT + BDA (mode reel)', 10
+    db '  0x000500-0x0007FF  Boot info (MineGRUB)', 10
+    db '  0x001000-0x00FFFF  Stack / zone libre', 10
+    db '  0x010000-0x02FFFF  Kernel ASM (code+data)', 10
+    db '  0x300000-0x3FFFFF  Back-buffer VESA', 10
+    db '  0x400000-0x4FFFFF  Heap noyau', 10
+    db '  Total RAM detecte: 128 MB', 10, 0
+s_mount:
+    db '/dev/hda   on  /     type ext2  (rw,relatime)', 10
+    db 'none       on  /proc type proc  (rw)', 10
+    db 'tmpfs      on  /tmp  type tmpfs (rw)', 10, 0
+s_env:
+    db 'PATH=/bin:/usr/bin:/usr/local/bin', 10
+    db 'HOME=/root', 10
+    db 'USER=root', 10
+    db 'SHELL=/bin/sh', 10
+    db 'TERM=myos-vt', 10
+    db 'LANG=fr_FR.UTF-8', 10
+    db 'HOSTNAME=myos.epitech.eu', 10
+    db 'OSTYPE=myos', 10, 0
+s_ifconfig:
+    db 'lo    Link encap:Local Loopback', 10
+    db '      inet addr:127.0.0.1  Mask:255.0.0.0', 10
+    db '      UP LOOPBACK RUNNING  MTU:65536', 10, 10
+    db 'eth0  Link encap:Ethernet  HWaddr 52:54:00:12:34:56', 10
+    db '      inet addr:10.0.2.15  Mask:255.255.255.0', 10
+    db '      UP BROADCAST RUNNING  MTU:1500', 10, 0
+s_netstat:
+    db 'Proto  LocalAddr          ForeignAddr    State', 10
+    db 'tcp    127.0.0.1:0        0.0.0.0:0      LISTEN', 10
+    db 'udp    10.0.2.15:68       0.0.0.0:0      -', 10, 0
+s_ping:
+    db 'PING 127.0.0.1 56(84) bytes of data.', 10
+    db '64 bytes from 127.0.0.1: icmp_seq=1 ttl=64 time=0.42ms', 10
+    db '64 bytes from 127.0.0.1: icmp_seq=2 ttl=64 time=0.38ms', 10
+    db '64 bytes from 127.0.0.1: icmp_seq=3 ttl=64 time=0.41ms', 10
+    db '3 paquets transmis, 0% perte', 10, 0
+s_about:
+    db '================================', 10
+    db '  MyOS v2.0 - Epitech Technology', 10
+    db '  Architecture  : x86 32-bit', 10
+    db '  Bootloader    : MineGRUB (ASM)', 10
+    db '  Kernel        : ASM pur (NASM)', 10
+    db '  Video         : VESA 640x480 24bpp', 10
+    db '  Auteur        : Epitech Barcelona', 10
+    db '================================', 10, 0
+s_cowsay:
+    db ' --------------------------', 10
+    db '< Mooooo! MyOS is alive!  >', 10
+    db ' --------------------------', 10
+    db '         \   ^__^', 10
+    db '          \  (oo)\_______', 10
+    db '             (__)\       )\/\', 10
+    db '                 ||----w |', 10
+    db '                 ||     ||', 10, 0
+s_matrix:
+    db 'Wake up, Neo...', 10
+    db 'The Matrix has you.', 10
+    db 'Follow the white rabbit.', 10
+    db 'Knock, knock, Neo.', 10, 0
+s_sl:
+    db '        ====        ________', 10
+    db '    _D _|  |_______/        \__', 10
+    db '   |(_)---  |   H\________/ |', 10
+    db '   /     |  |   H  |  |  |  |', 10
+    db '  | | | |    \_____/ |__|__|', 10, 0
+s_creeper:
+    db '  Creeper, Aw Man...', 10
+    db '  +---------+', 10
+    db '  |  ##  ## |', 10
+    db '  |  ##  ## |', 10
+    db '  |   ####  |', 10
+    db '  |  ######  |', 10
+    db '  | ##  ## # |', 10
+    db '  +---------+', 10, 0
+s_false_out  db 'false: exit status 1', 10, 0
+s_exit       db '(pas de session parente a quitter)', 10, 0
+s_sudo       db '[sudo] MyOS: root@myos - acces accorde', 10, 0
+s_shell      db 'MyOS Shell v2.0 (deja en cours d execution)', 10, 0
+s_history    db '(historique: non disponible en kernel ASM pur)', 10, 0
+s_cal:
+    db '       Mai 2026', 10
+    db 'Lu Ma Me Je Ve Sa Di', 10
+    db '             1  2  3', 10
+    db ' 4  5  6  7  8  9 10', 10
+    db '11 12 13 14 15 16 17', 10
+    db '18 19 20 *21 22 23 24', 10
+    db '25 26 27 28 29 30 31', 10, 0
+s_time       db 'uptime (ticks): ', 0
+s_banner:
+    db '  ###   ###  #  #  ###', 10
+    db '  #  #  #  # #  # #   ', 10
+    db '  ###   ###  #  #  ## ', 10
+    db '  # #   #    #  #    #', 10
+    db '  #  #  #     ##  ###  -- MyOS', 10, 0
+s_man:
+    db 'MAN(1) MyOS Reference Manual', 10
+    db 'Commandes: help, ls, ps, top, free, df,', 10
+    db '  dmesg, lscpu, lspci, ifconfig, ping,', 10
+    db '  uname, date, fortune, cowsay, reboot', 10
+    db 'Tapez "help" pour la liste complete.', 10, 0
+s_which      db '/bin/', 10, 0
+s_kill       db 'kill: processus introuvable', 10, 0
+s_mkdir      db 'mkdir: repertoire cree (VFS virtuel)', 10, 0
+s_touch      db 'touch: fichier mis a jour (VFS virtuel)', 10, 0
+s_rm         db 'rm: fichier supprime (VFS virtuel)', 10, 0
+s_cp         db 'cp: copie effectuee (VFS virtuel)', 10, 0
+s_mv         db 'mv: fichier deplace (VFS virtuel)', 10, 0
+s_grep       db 'grep: aucun resultat correspondant', 10, 0
+s_find_out:
+    db '/', 10
+    db '/bin', 10
+    db '/etc', 10
+    db '/proc', 10
+    db '/home/root', 10
+    db '/var', 10, 0
+s_du         db '0       .', 10, 0
+s_stat       db 'Fichier: ?  Taille: 0  Mode: 644  Uid: 0', 10, 0
+s_file       db 'data: ASCII text', 10, 0
+s_nosupport  db 'Erreur: non supporte en baremetal (strace/gdb)', 10, 0
+s_nosupport2 db 'Erreur: pas de compilateur runtime (make/gcc)', 10, 0
+s_nosupport3 db 'Erreur: reseau HTTP non supporte ici (curl/wget)', 10, 0
+s_nosupport4 db 'Erreur: SSH/FTP non supporte en baremetal', 10, 0
+s_wc         db '  0  0  0 (stdin)', 10, 0
+s_stdin      db '(stdin: entree standard non supportee)', 10, 0
+
+; Table fortune (8 citations)
+align 4
+fort_table:
+    dd s_fort0, s_fort1, s_fort2, s_fort3
+    dd s_fort4, s_fort5, s_fort6, s_fort7
+fortune_idx dd 0
+
+s_fort0 db 'Creeper, Aw Man...', 10, 0
+s_fort1 db 'make: *** [all] Error 1 -- classique.', 10, 0
+s_fort2 db "There's no place like 127.0.0.1", 10, 0
+s_fort3 db 'sudo make me a sandwich.', 10, 0
+s_fort4 db 'The answer is 42.', 10, 0
+s_fort5 db 'rm -rf /* -- Ouf, machine virtuelle!', 10, 0
+s_fort6 db '42h sans dormir = hacker mode: ON', 10, 0
+s_fort7 db ':(){:|:&};:  <- fork bomb (blague ASM)', 10, 0
 
 ; ===== VESA variables =====
 vesa_active  db 0

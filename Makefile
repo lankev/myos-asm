@@ -25,7 +25,7 @@ LIBC_OBJ  = $(patsubst %.c, $(BUILD)/%.o, $(LIBC_SRC))
 SFCML_OBJ = $(patsubst %.c, $(BUILD)/%.o, $(SFCML_SRC))
 NET_OBJ   = $(patsubst %.c, $(BUILD)/%.o, $(NET_SRC))
 
-.PHONY: all libs clean run debug
+.PHONY: all libs clean run run-asm debug debug-asm
 
 all: $(BUILD)/myos.img
 	@echo ""
@@ -60,6 +60,7 @@ $(BUILD)/myos.img: $(BUILD)/boot.bin $(BUILD)/minegrub.bin $(BUILD)/kernel.bin
 	dd if=$(BUILD)/minegrub.bin bs=512 count=16 of=$@ seek=1  conv=notrunc 2>/dev/null
 	dd if=$(BUILD)/kernel.bin bs=512 count=128  of=$@ seek=17  conv=notrunc 2>/dev/null
 	dd if=$(BUILD)/kernel.bin bs=512 skip=128 count=128 of=$@ seek=145 conv=notrunc 2>/dev/null || true
+	dd if=$(BUILD)/kernel.bin bs=512 skip=256 count=128 of=$@ seek=273 conv=notrunc 2>/dev/null || true
 	@echo "[IMG] $(BUILD)/myos.img pret"
 	@ls -lh $(BUILD)/
 
@@ -99,10 +100,17 @@ $(BUILD)/kernel.bin: $(BUILD)/kernel.elf
 	objcopy -O binary $< $@
 	@echo "[KERN] $@"
 
-QFLAGS = -drive file=$(BUILD)/myos.img,format=raw,if=floppy \
-         -boot a -no-reboot -no-shutdown \
+QFLAGS = -drive file=$(BUILD)/myos.img,format=raw,if=ide \
+         -boot c -no-reboot -no-shutdown \
          -vga std -m 128M \
+         -display gtk,zoom-to-fit=on \
          -netdev user,id=net0 -device rtl8139,netdev=net0
+
+QFLAGS_ASM = -drive file=$(BUILD)/myos_asm.img,format=raw,if=ide \
+             -boot c -no-reboot -no-shutdown \
+             -vga std -m 128M \
+             -display gtk,zoom-to-fit=on \
+             -netdev user,id=net0 -device rtl8139,netdev=net0
 
 run: all
 	$(QEMU) $(QFLAGS)
@@ -110,5 +118,49 @@ run: all
 debug: all
 	$(QEMU) $(QFLAGS) -s -S
 
+# ---------------------------------------------------------------
+# Kernel ASM pur (kernel/kernel.asm standalone)
+# ---------------------------------------------------------------
+$(BUILD)/kernel_asm.bin: kernel/kernel.asm
+	@mkdir -p $(BUILD)
+	$(AS) -f bin -o $@ $<
+	@echo "[ASM] $@ ($(shell wc -c < $@) octets)"
+
+$(BUILD)/myos_asm.img: $(BUILD)/boot.bin $(BUILD)/minegrub.bin $(BUILD)/kernel_asm.bin
+	@mkdir -p $(BUILD)
+	dd if=/dev/zero              bs=512 count=2880 of=$@            2>/dev/null
+	dd if=$(BUILD)/boot.bin      bs=512 count=1    of=$@ seek=0  conv=notrunc 2>/dev/null
+	dd if=$(BUILD)/minegrub.bin  bs=512 count=16   of=$@ seek=1  conv=notrunc 2>/dev/null
+	dd if=$(BUILD)/kernel_asm.bin bs=512 count=256  of=$@ seek=17 conv=notrunc 2>/dev/null || true
+	@echo "[IMG] $(BUILD)/myos_asm.img pret"
+	@ls -lh $(BUILD)/myos_asm.img
+
+run-asm: $(BUILD)/myos_asm.img
+	@echo "  Lancement du kernel ASM pur dans QEMU..."
+	$(QEMU) $(QFLAGS_ASM)
+
+debug-asm: $(BUILD)/myos_asm.img
+	@echo "  Debug kernel ASM: connecte gdb sur localhost:1234"
+	$(QEMU) $(QFLAGS_ASM) -s -S
+
 clean:
 	rm -rf $(BUILD)
+
+# =============================================================
+# Ecriture sur cle USB (Linux / WSL)
+# Usage: make usb DEV=/dev/sdX   (ex: make usb DEV=/dev/sdb)
+# ATTENTION: efface toutes les donnees de la cle !
+# Trouver la cle : lsblk  ou  dmesg | tail -20
+# =============================================================
+DEV ?= /dev/sdb
+usb: $(BUILD)/myos.img
+	@echo ""
+	@echo "  ================================================"
+	@echo "  ATTENTION: Ecriture de myos.img sur $(DEV)"
+	@echo "  Toutes les donnees sur $(DEV) seront perdues!"
+	@echo "  Ctrl+C pour annuler, Entree pour continuer..."
+	@echo "  ================================================"
+	@read dummy
+	dd if=$(BUILD)/myos.img of=$(DEV) bs=512 conv=notrunc,fsync
+	sync
+	@echo "[USB] Image ecrite sur $(DEV) - OK"

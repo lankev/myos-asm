@@ -1,6 +1,10 @@
 #include "sfcml.h"
 #include "stdint.h"
 
+#define BOOT_INFO  ((volatile uint8_t*)0x0500)
+#define BI_WIDTH   (*((volatile uint16_t*)(BOOT_INFO + 4)))
+#define BI_HEIGHT  (*((volatile uint16_t*)(BOOT_INFO + 6)))
+
 /* ============================================================
  * Clavier PS/2 bare-metal
  * Port 0x60 = data, 0x64 = status
@@ -30,7 +34,7 @@ static void _wait_rd(void) { /* attend qu'une donnee soit disponible */
  * ============================================================ */
 static void _evt_push(sfcml_Event e); /* declaration anticipee */
 
-static int     _mx = 320, _my = 240, _mbtn = 0;
+static int     _mx = 400, _my = 300, _mbtn = 0;
 static int     _mp = 0;        /* phase du paquet (0-2) */
 static uint8_t _mpkt[3];
 
@@ -46,10 +50,14 @@ static void _mouse_handle(uint8_t data) {
     int dy = (int)_mpkt[2] - ((flags & 0x20) ? 256 : 0);
     _mx += dx;
     _my -= dy; /* Y inverse en PS/2 */
-    if (_mx <   0) _mx = 0;
-    if (_mx > 639) _mx = 639;
-    if (_my <   0) _my = 0;
-    if (_my > 479) _my = 479;
+    int _scr_w = (int)BI_WIDTH;
+    int _scr_h = (int)BI_HEIGHT;
+    if (_scr_w <= 0) _scr_w = 800;
+    if (_scr_h <= 0) _scr_h = 600;
+    if (_mx <  0) _mx = 0;
+    if (_mx >= _scr_w) _mx = _scr_w - 1;
+    if (_my <  0) _my = 0;
+    if (_my >= _scr_h) _my = _scr_h - 1;
 
     sfcml_Event em = {0};
     em.type = SFCML_EVT_MOUSE_MOVED;
@@ -264,15 +272,13 @@ int sfcml_isKeyPressed(sfcml_KeyCode key) {
  * Souris - initialisation et accesseurs
  * ============================================================ */
 void sfcml_mouseInit(void) {
-    /* Activer le port auxiliaire (souris) */
-    _wait_wr(); _outb(0x64, 0xA8);
-    /* Vider le buffer */
-    while (_kbd_status() & 0x01) _inb(0x60);
-    /* Commande "set defaults" */
+    _wait_wr(); _outb(0x64, 0xA8);  /* activer port auxiliaire */
+    while (_kbd_status() & 0x01) _inb(0x60); /* vider buffer */
+    /* Set defaults */
     _wait_wr(); _outb(0x64, 0xD4);
     _wait_wr(); _outb(0x60, 0xF6);
     _wait_rd(); if (_kbd_status() & 0x01) _inb(0x60); /* ACK */
-    /* Commande "enable data reporting" */
+    /* Enable data reporting */
     _wait_wr(); _outb(0x64, 0xD4);
     _wait_wr(); _outb(0x60, 0xF4);
     _wait_rd(); if (_kbd_status() & 0x01) _inb(0x60); /* ACK */
