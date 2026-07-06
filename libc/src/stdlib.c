@@ -3,11 +3,13 @@
 #include "stdint.h"
 
 /* ========== Heap (free-list allocateur) ==========
- * Heap place a 4 Mo, taille 4 Mo.
+ * Heap place a 5 Mo, taille 4 Mo.
+ * (0x300000-0x468000 = backbuffer VESA 800x600x24 ;
+ *  0x400000-0x428000 = canvas Paint : le heap doit etre au-dela)
  * Chaque bloc = header (block_t) + donnees utilisateur.
  * Fusion des blocs libres adjacents a chaque free().
  */
-#define HEAP_BASE  0x00400000U
+#define HEAP_BASE  0x00500000U
 #define HEAP_SIZE  (4U * 1024U * 1024U)
 #define ALIGN      8U
 
@@ -62,6 +64,20 @@ void free(void* ptr) {
         b->size += sizeof(block_t) + b->next->size;
         b->next  = b->next->next;
     }
+}
+
+/* Statistiques reelles du heap (parcours de la free-list) */
+void malloc_stats(uint32_t* total, uint32_t* used, uint32_t* nblocks) {
+    uint32_t t = HEAP_SIZE, u = 0, n = 0;
+    if (_heap) {
+        for (block_t* b = _heap; b; b = b->next) {
+            n++;
+            if (b->used) u += b->size + sizeof(block_t);
+        }
+    }
+    if (total)   *total   = t;
+    if (used)    *used    = u;
+    if (nblocks) *nblocks = n;
 }
 
 void* realloc(void* ptr, size_t new_size) {

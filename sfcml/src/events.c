@@ -203,18 +203,16 @@ static void _process_scancode(uint8_t sc) {
         _ext = 0;
         if (code == 0x1D) { _ctrl = !released; return; }
         if (code == 0x38) { _alt  = !released; return; }
-        if (!released) {
-            sfcml_KeyCode kc = SFCML_KEY_NONE;
-            if      (code == 0x48) kc = SFCML_KEY_UP;
-            else if (code == 0x50) kc = SFCML_KEY_DOWN;
-            else if (code == 0x4B) kc = SFCML_KEY_LEFT;
-            else if (code == 0x4D) kc = SFCML_KEY_RIGHT;
-            if (kc) {
-                sfcml_Event e = {0};
-                e.type = SFCML_EVT_KEY_PRESSED;
-                e.key.code = kc; e.key.shift=_shift; e.key.ctrl=_ctrl; e.key.alt=_alt;
-                _evt_push(e);
-            }
+        sfcml_KeyCode kc = SFCML_KEY_NONE;
+        if      (code == 0x48) kc = SFCML_KEY_UP;
+        else if (code == 0x50) kc = SFCML_KEY_DOWN;
+        else if (code == 0x4B) kc = SFCML_KEY_LEFT;
+        else if (code == 0x4D) kc = SFCML_KEY_RIGHT;
+        if (kc) {
+            sfcml_Event e = {0};
+            e.type = released ? SFCML_EVT_KEY_RELEASED : SFCML_EVT_KEY_PRESSED;
+            e.key.code = kc; e.key.shift=_shift; e.key.ctrl=_ctrl; e.key.alt=_alt;
+            _evt_push(e);
         }
         return;
     }
@@ -287,6 +285,9 @@ void sfcml_mouseInit(void) {
 int sfcml_getMouseX(void)         { return _mx; }
 int sfcml_getMouseY(void)         { return _my; }
 int sfcml_getMouseButton(int btn) { return (_mbtn >> btn) & 1; }
+
+/* Replace le curseur (pointer lock / mouse-look) */
+void sfcml_warpMouse(int x, int y) { _mx = x; _my = y; }
 
 /* ============================================================
  * Chronometre (utilise le compteur PIT via port 0x40)

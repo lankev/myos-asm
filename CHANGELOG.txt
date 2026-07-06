@@ -1,0 +1,191 @@
+================================================================================
+                    MyOS - CHANGELOG DES MODIFICATIONS
+================================================================================
+Auteur des changements : session de developpement assistee (Claude)
+Cible  : kernel/kmain.c, sfcml/, net/, libc/, kernel/crt0.asm
+Regle  : 100% from scratch, aucune bibliotheque externe.
+Budget : kernel <= 192 Ko (3 chunks de 128 secteurs). Actuel : ~164 Ko.
+Tests  : compiles via WSL (gcc -m32/nasm/ld), verifies en jeu sous QEMU
+         (moniteur : screendump / sendkey / mouse), captures a l'appui.
+================================================================================
+
+
+================================================================================
+ [1] MYCRAFT - UN MINECRAFT 3D CONSTRUIT DE ZERO
+================================================================================
+
+Nouveau jeu integre au bureau, accessible par 3 chemins :
+  - icone "MyCraft" (bloc d'herbe) sur le bureau
+  - menu Demarrer -> MyCraft
+  - commande terminal : minecraft (ou mycraft)
+
+MOTEUR DE RENDU
+  - Rendu 3D premiere personne par raycasting voxel, un rayon par pixel.
+  - DDA voxel en virgule fixe 16.16 (aucun flottant dans la boucle chaude).
+  - Resolution interne 160x120, upscale x4 -> 640x480.
+  - Ombrage par face, brouillard de distance, ciel en degrade.
+  - Perf mesuree : 25-32 FPS sous QEMU (emulation TCG).
+
+MONDE
+  - Voxel 64 x 64 x 32, genere proceduralement :
+      * collines (bruit de valeur interpole sur une grille 9x9)
+      * arbres (tronc + houppier)
+      * grottes (spheres creusees)
+      * plages de sable, socle en bedrock incassable
+  - Touche G : regenere un nouveau monde aleatoire.
+
+TEXTURES (les "props", 100% faites par code)
+  - 11 blocs, textures 16x16 generees par algorithme, zero asset externe :
+    herbe, terre, pierre, pave, planches, bois (avec anneaux de coupe),
+    feuilles (trous transparents), sable, brique (avec mortier),
+    verre (transparent), bedrock.
+
+GAMEPLAY / PHYSIQUE
+  - Gravite, saut, collisions AABB, glissement le long des murs.
+  - Clic gauche  : casser un bloc (portee 6, bedrock protege).
+  - Clic droit   : poser un bloc (refuse si chevauche le joueur).
+  - Hotbar 9 blocs, selection par les touches 1-9.
+  - Deplacement ZQSD (AZERTY natif), regard aux fleches, Espace = saut.
+
+FICHIERS TOUCHES
+  - kernel/kmain.c : ajout du type de fenetre W_MINE, icone, entree menu,
+    commande shell, integration dans la boucle d'evenements et le rendu,
+    ~500 lignes de logique de jeu (monde, textures, physique, raycaster).
+
+CORRECTIONS DE BUGS DE L'OS DECOUVERTS EN TESTANT
+  - kmain.c win_front() : ne donnait pas le focus a une fenetre deja au
+    premier plan -> la derniere fenetre du z-order ne recevait jamais le
+    clavier. Corrige (profite aussi aux autres apps).
+  - sfcml/src/events.c : les touches flechees n'emettaient jamais
+    d'evenement "relachee" (release des scancodes etendus ignore).
+    Corrige (profite aussi a R-Type et Pong).
+
+
+================================================================================
+ [2] MYCRAFT - VUE LIBRE A LA SOURIS (MOUSE-LOOK)
+================================================================================
+
+Ajout de la rotation de camera a la souris, facon Minecraft.
+
+  - Touche Tab : capture/relache la souris ("pointer lock").
+    Indicateur "[SOURIS ON - Tab/Echap]" affiche, curseur masque.
+  - Souris capturee : le mouvement tourne la camera (yaw + pitch),
+    sensibilite 0.005 rad/pixel.
+  - Echap : 1er appui libere la souris, 2e appui minimise la fenetre.
+  - Liberation automatique si la fenetre perd le focus.
+  - Les fleches clavier continuent de fonctionner en parallele.
+
+MECANIQUE (l'OS n'a pas de mode souris relatif natif)
+  - Chaque frame : mesure de l'ecart du curseur au centre de la fenetre,
+    application de la rotation, puis re-centrage du curseur.
+
+NOUVELLE API GRAPHIQUE (reutilisable par d'autres apps)
+  - sfcml_warpMouse(x, y) ajoute a sfcml/src/events.c + sfcml/include/sfcml.h.
+
+
+================================================================================
+ [3] DU SIMULE AU REEL - TOUT INTERROGE LE VRAI MATERIEL (from scratch)
+================================================================================
+
+Objectif : remplacer les sorties codees en dur par de vraies mesures, sans
+aucune bibliotheque. Ce qui est physiquement impossible reste symbolique mais
+l'annonce honnetement.
+
+--- TEMPS REEL (IDT + PIC + PIT) -----------------------------------------------
+  - Avant : aucune interruption ; BIOS_TICKS (0x046C) fige ; uptime/sleep faux.
+  - Apres : IDT installee, PIC 8259 remappe (vecteurs 0x20-0x2F), PIT lance a
+    18.2 Hz sur IRQ0. L'ISR irq0_stub (crt0.asm) incremente 0x046C.
+    -> BIOS_TICKS redevient reel : uptime, sleep, horloges SFCML, FPS.
+  - Seul IRQ0 est demasque ; clavier/souris restent en polling.
+  - Fichiers : kernel/crt0.asm (ISR irq0_stub, irq_ignore_stub),
+    kernel/kmain.c (time_init : IDT/PIC/PIT), sh_uptime/sh_sleep reels.
+
+--- MATERIEL REEL --------------------------------------------------------------
+  - lscpu    : CPUID reel (vendor, marque, famille, flags) + frequence CPU
+               MESUREE via TSC sur des ticks PIT.
+  - lspci    : SCAN REEL du bus PCI (ports 0xCF8/0xCFC), affiche les
+               fonctions reellement presentes avec vendor:device.
+  - dmidecode: lit les vraies structures SMBIOS (ancres _SM_ et _SM3_ en
+               0xF0000-0xFFFFF) -> vendor BIOS, version, date, systeme.
+  - acpi     : trouve le RSDP (0xE0000-0xFFFFF), liste les tables du RSDT
+               (FACP, APIC, HPET, WAET) avec adresses et tailles reelles.
+  - free/mem : RAM totale lue dans le CMOS, occupation heap reelle
+               (nouvelle fonction libc malloc_stats), tailles kernel/bss
+               via symboles du linker.
+  - lsmod    : etat reel des drivers (VESA, rtl8139 + MAC, ATA + modele,
+               PIT + ticks, PS/2).
+  - lshw     : inventaire reel (CPU CPUID, RAM CMOS, VESA, MAC, disque ATA).
+  - dmesg    : VRAI journal noyau (ring buffer klog) horodate par ticks PIT,
+               rempli au boot (IDT, VESA, FPU, PS/2, RTC, RAM, ATA, MyFS, net).
+
+--- DISQUE REEL (driver ATA PIO + persistance) ---------------------------------
+  - Driver ATA PIO LBA28 ecrit de zero (ports 0x1F0-0x1F7, polling, nIEN).
+    IDENTIFY -> modele, numero de serie, nombre de secteurs reels.
+  - MyFS : le VFS dynamique est ecrit sur disque (superbloc au LBA 500,
+    magie "YFS1") et RELU AU BOOT. Les fichiers survivent au reboot.
+  - Persistance verifiee EN DUR : fichier cree dans une instance QEMU,
+    retrouve apres arret complet et relance sur la meme image.
+  - df/fdisk/hdparm/fsck/mkfs/blkid operent sur ce vrai systeme de fichiers.
+  - Synchronisation apres chaque commande + chaque seconde (nano/word).
+
+--- RESEAU REEL (vraies trames sur le cable, via net.c/rtl8139) -----------------
+  - ping       : vrais paquets ICMP echo, RTT mesure en ticks PIT.
+  - traceroute : sondes ICMP a TTL croissant (vrais time-exceeded).
+  - nslookup   : vraie requete DNS UDP/53 (ex : example.com -> IP reelle).
+  - arp        : vraie requete ARP -> MAC reelle de la passerelle.
+  - netstat    : etat reel de la pile (IP DHCP/statique, GW, DNS, MAC).
+  - Nouvelles API : net_arp, net_dns, net_ping (net/net.c + net/net.h).
+
+--- CRYPTO REELLE (algorithmes complets, from scratch) -------------------------
+  - md5sum    : MD5 complet (RFC 1321).
+  - sha256sum : SHA-256 complet (FIPS 180-4).
+  - VERIFIES BIT-A-BIT contre les coreutils du systeme hote (md5sum/sha256sum)
+    sur plusieurs vecteurs de test -> identiques.
+  - Hachent le contenu reel d'un fichier du VFS si le chemin existe,
+    sinon le texte passe en argument.
+
+--- ETAT SYSTEME REEL ----------------------------------------------------------
+  - ps/top   : listent les vraies fenetres ouvertes + occupation memoire.
+  - vmstat   : memoire libre reelle, blocs heap, compteurs de secteurs I/O.
+  - iostat   : compteurs reels de secteurs lus/ecrits (ATA).
+
+--- RESTE FORCEMENT SYMBOLIQUE (annonce honnetement) ---------------------------
+  Impossible sans multi-processus ni toolchain embarquable dans le budget :
+    gcc, nasm, make, ld            (pas de compilateur embarque)
+    tar, gzip, bzip2, xz           (pas de vraie compression)
+    gpg, openssl enc               (pas de vraie crypto asymetrique userspace)
+    systemctl, service, useradd,   (pas de gestion de processus/utilisateurs)
+    crontab, iconv
+
+--- CORRECTION MEMOIRE (bug latent) --------------------------------------------
+  - Le heap malloc etait a 0x400000, en plein sur le canvas de Paint
+    (0x400000, 157 Ko). Deplace a 0x500000. (libc/src/stdlib.c)
+  - Nouvelle carte memoire :
+      0x010000 kernel image (~164 Ko)
+      0x200000 pile kernel
+      0x300000 backbuffer VESA (1406 Ko, 800x600x24)
+      0x400000 canvas Paint (157 Ko)
+      0x500000 heap malloc (4096 Ko)
+
+
+================================================================================
+ RECAPITULATIF DES FICHIERS MODIFIES
+================================================================================
+  kernel/kmain.c          jeu MyCraft, mouse-look, IDT/PIC/PIT, ATA, MyFS,
+                          CPUID/PCI/SMBIOS/ACPI, MD5/SHA-256, ps/top/free reels
+  kernel/crt0.asm         ISR IRQ0 (irq0_stub) + ISR par defaut (irq_ignore_stub)
+  sfcml/src/events.c      fix release des touches etendues, sfcml_warpMouse
+  sfcml/include/sfcml.h   declaration sfcml_warpMouse
+  net/net.c               net_arp, net_dns, net_ping (ICMP TTL, DNS, ARP reels)
+  net/net.h               declarations reseau
+  libc/src/stdlib.c       malloc_stats, heap deplace a 0x500000
+  libc/include/stdlib.h   declaration malloc_stats
+
+================================================================================
+ ETAT
+================================================================================
+  Compile sans erreur. Kernel ~164 Ko (budget 192 Ko, marge ~28 Ko).
+  MyCraft : 29 FPS, aucune regression apres les changements bas niveau.
+  Persistance disque, reseau, crypto, materiel : verifies sous QEMU.
+  Aucun commit git effectue (working tree uniquement).
+================================================================================

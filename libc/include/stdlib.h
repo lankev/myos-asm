@@ -7,6 +7,7 @@ void*  malloc (size_t size);
 void   free   (void* ptr);
 void*  realloc(void* ptr, size_t new_size);
 void*  calloc (size_t nmemb, size_t size);
+void   malloc_stats(uint32_t* total, uint32_t* used, uint32_t* nblocks);
 
 int    atoi(const char* s);
 long   atol(const char* s);

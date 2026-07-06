@@ -485,6 +485,55 @@ int net_ping_gw(void){
     return 0;
 }
 
+/* ---- API publiques supplementaires (vraies trames sur le cable) ---- */
+int net_arp(uint32_t ip,uint8_t*mac){
+    if(!net_ok)return 0;
+    return arp_resolve(ip,mac);
+}
+int net_dns(const char*host,uint32_t*ip){
+    if(!net_ok)return 0;
+    return dns_resolve(host,ip);
+}
+/* Ping ICMP generalise, TTL parametrable.
+   Retour: 1=echo reply, 2=time-exceeded (hop intermediaire), 0=timeout.
+   rtt_ticks: duree reelle en ticks PIT (18.2 Hz). hop_ip: source de la reponse. */
+int net_ping(uint32_t dip,uint8_t ttl,uint32_t*rtt_ticks,uint32_t*hop_ip){
+    if(!net_ok)return 0;
+    uint8_t fr[42];
+    EH*e=(EH*)fr;memcpy(e->d,_gwmac,6);memcpy(e->s,net_mac,6);e->t=htons(0x0800);
+    IH*ih=(IH*)(fr+14);
+    ih->ihl=0x45;ih->tos=0;ih->len=htons(28);
+    static uint16_t pid=800;pid++;
+    ih->id=htons(pid);ih->fl=0;
+    ih->ttl=ttl;ih->pr=1;ih->cs=0;ih->s=htonl(net_my_ip);ih->d=htonl(dip);
+    ih->cs=cksum(ih,20);
+    ICH*ic=(ICH*)(fr+34);
+    ic->type=8;ic->code=0;ic->cs=0;ic->id=htons(0x4D59);ic->seq=htons(pid);
+    ic->cs=cksum(ic,8);
+    volatile uint32_t* ticks=(volatile uint32_t*)0x046C;
+    uint32_t t0=*ticks;
+    rtl_tx(fr,42);
+    uint8_t buf[600];
+    for(int i=0;i<1500000;i++){
+        uint16_t l=rtl_rx(buf,5);
+        if(l<42)continue;
+        EH*re=(EH*)buf;if(ntohs(re->t)!=0x0800)continue;
+        IH*ri=(IH*)(buf+14);if(ri->pr!=1)continue;
+        ICH*ric=(ICH*)(buf+34);
+        if(ric->type==0&&ntohs(ric->id)==0x4D59&&ntohl(ri->s)==dip){
+            if(rtt_ticks)*rtt_ticks=*ticks-t0;
+            if(hop_ip)*hop_ip=ntohl(ri->s);
+            return 1;
+        }
+        if(ric->type==11){   /* TTL expire en route */
+            if(rtt_ticks)*rtt_ticks=*ticks-t0;
+            if(hop_ip)*hop_ip=ntohl(ri->s);
+            return 2;
+        }
+    }
+    return 0;
+}
+
 /* ---- Public API ---- */
 int net_init(void){
     if(!rtl_find())return 0;

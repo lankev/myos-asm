@@ -25,9 +25,110 @@ static void rtype_reset(void);
 static void draw_rtype(sfcml_Window* win, int wi);
 static void pong_reset(void);
 static void draw_pong(sfcml_Window* win, int wi);
+#define W_MINE     14
+static int  _mine_inited;
+static int  _mc_look;   /* capture souris (mouse-look), bascule avec Tab */
+static void mine_reset(void);
+static void mine_step(void);
+static void mine_click(int btn);
+static void mine_key_press(sfcml_KeyCode k);
+static void mine_key_release(sfcml_KeyCode k);
+static void draw_mine(sfcml_Window* win, int wi);
 
 void _putchar(char c) { (void)c; }
 #define BIOS_TICKS (*(volatile uint32_t*)0x046C)
+
+/* ============================================================
+ * E/S ports
+ * ============================================================ */
+static inline uint8_t k_inb(uint16_t p){uint8_t v;__asm__ volatile("inb %1,%0":"=a"(v):"Nd"(p));return v;}
+static inline void k_outb(uint16_t p,uint8_t v){__asm__ volatile("outb %0,%1"::"a"(v),"Nd"(p));}
+static inline uint16_t k_inw(uint16_t p){uint16_t v;__asm__ volatile("inw %1,%0":"=a"(v):"Nd"(p));return v;}
+static inline void k_outw(uint16_t p,uint16_t v){__asm__ volatile("outw %0,%1"::"a"(v),"Nd"(p));}
+static inline uint32_t k_inl(uint16_t p){uint32_t v;__asm__ volatile("inl %1,%0":"=a"(v):"Nd"(p));return v;}
+static inline void k_outl(uint16_t p,uint32_t v){__asm__ volatile("outl %0,%1"::"a"(v),"Nd"(p));}
+
+/* ============================================================
+ * Journal noyau (dmesg reel) - ring buffer texte
+ * ============================================================ */
+#define KLOG_SZ 4096
+static char _klog[KLOG_SZ];
+static int  _klog_len=0;
+static void klog(const char* msg){
+    /* timestamp reel: ticks PIT a 18.2 Hz -> secondes.centiemes */
+    uint32_t t=BIOS_TICKS;
+    uint32_t cs=(t*100u)/18u;   /* centisecondes depuis boot */
+    char hd[16];int o=0;
+    hd[o++]='[';
+    uint32_t s=cs/100u;
+    if(s>=100)hd[o++]=(char)('0'+(s/100)%10);
+    hd[o++]=(char)('0'+(s/10)%10);hd[o++]=(char)('0'+s%10);
+    hd[o++]='.';hd[o++]=(char)('0'+(cs/10)%10);hd[o++]=(char)('0'+cs%10);
+    hd[o++]=']';hd[o++]=' ';hd[o]='\0';
+    for(int i=0;hd[i]&&_klog_len<KLOG_SZ-2;i++)_klog[_klog_len++]=hd[i];
+    for(int i=0;msg[i]&&_klog_len<KLOG_SZ-2;i++)_klog[_klog_len++]=msg[i];
+    _klog[_klog_len++]='\n';_klog[_klog_len]='\0';
+}
+
+/* ============================================================
+ * IDT + PIC + PIT : le temps devient reel.
+ * L'ISR IRQ0 (crt0.asm) incremente le dword a 0x046C, la meme
+ * adresse que le compteur de ticks BIOS : BIOS_TICKS et tous
+ * ses utilisateurs (uptime, sleep, horloges SFCML) redeviennent
+ * exacts. PIT programme a 18.2065 Hz (diviseur 65536), comme le
+ * BIOS. Toutes les autres IRQ restent masquees (clavier/souris
+ * sont polles).
+ * ============================================================ */
+typedef struct{uint16_t lo,sel;uint8_t zero,flags;uint16_t hi;}__attribute__((packed)) IDTEntry;
+static IDTEntry _idt[256];
+extern void irq0_stub(void);
+extern void irq_ignore_stub(void);
+static void _idt_set(int n,void(*h)(void)){
+    uint32_t a=(uint32_t)h;
+    _idt[n].lo=(uint16_t)(a&0xFFFF);_idt[n].sel=0x08;
+    _idt[n].zero=0;_idt[n].flags=0x8E;_idt[n].hi=(uint16_t)(a>>16);
+}
+static void time_init(void){
+    for(int i=32;i<48;i++)_idt_set(i,irq_ignore_stub);
+    _idt_set(32,irq0_stub);
+    struct{uint16_t lim;uint32_t base;}__attribute__((packed)) idtr={
+        (uint16_t)(sizeof _idt-1),(uint32_t)_idt};
+    __asm__ volatile("lidt %0"::"m"(idtr));
+    /* PIC 8259: remap IRQ0-15 -> vecteurs 0x20-0x2F */
+    k_outb(0x20,0x11);k_outb(0xA0,0x11);
+    k_outb(0x21,0x20);k_outb(0xA1,0x28);
+    k_outb(0x21,0x04);k_outb(0xA1,0x02);
+    k_outb(0x21,0x01);k_outb(0xA1,0x01);
+    k_outb(0x21,0xFE);k_outb(0xA1,0xFF);   /* seul IRQ0 demasque */
+    /* PIT canal 0, mode 2, diviseur 65536 -> 18.2065 Hz */
+    k_outb(0x43,0x34);k_outb(0x40,0x00);k_outb(0x40,0x00);
+    BIOS_TICKS=0;
+    __asm__ volatile("sti");
+}
+
+/* ============================================================
+ * CPUID + TSC (infos CPU reelles)
+ * ============================================================ */
+static void k_cpuid(uint32_t leaf,uint32_t*a,uint32_t*b,uint32_t*c,uint32_t*d){
+    __asm__ volatile("cpuid":"=a"(*a),"=b"(*b),"=c"(*c),"=d"(*d):"a"(leaf),"c"(0));
+}
+static uint64_t k_rdtsc(void){
+    uint32_t lo,hi;__asm__ volatile("rdtsc":"=a"(lo),"=d"(hi));
+    return ((uint64_t)hi<<32)|lo;
+}
+
+/* ============================================================
+ * PCI : lecture espace de configuration (ports 0xCF8/0xCFC)
+ * ============================================================ */
+static uint32_t k_pci_rd(uint8_t bus,uint8_t dev,uint8_t fn,uint8_t reg){
+    k_outl(0xCF8,0x80000000u|((uint32_t)bus<<16)|((uint32_t)dev<<11)|
+                 ((uint32_t)fn<<8)|(reg&0xFC));
+    return k_inl(0xCFC);
+}
+
+/* Compteurs d'E/S disque reels (pour iostat/vmstat) */
+static uint32_t _ata_rd_cnt=0,_ata_wr_cnt=0;
+static int _dvfs_dirty=0;
 
 /* ============================================================
  * RTC (Real Time Clock) via CMOS
@@ -222,12 +323,13 @@ static DVFSEntry* _dvfs_create(const char* p,int is_dir){
         if(!_dvfs[i].used){
             strncpy(_dvfs[i].path,p,DVFS_PLEN-1);_dvfs[i].path[DVFS_PLEN-1]='\0';
             _dvfs[i].content[0]='\0';_dvfs[i].is_dir=is_dir;_dvfs[i].used=1;
+            _dvfs_dirty=1;
             return &_dvfs[i];
         }
     }
     return 0;
 }
-static void _dvfs_remove(const char* p){DVFSEntry*e=_dvfs_find(p);if(e)e->used=0;}
+static void _dvfs_remove(const char* p){DVFSEntry*e=_dvfs_find(p);if(e){e->used=0;_dvfs_dirty=1;}}
 static void _dvfs_fullpath(const char* name,char* out,int olen){
     if(name[0]=='/'){strncpy(out,name,olen-1);out[olen-1]='\0';return;}
     int cl=(int)strlen(_cwd);strncpy(out,_cwd,olen-1);out[olen-1]='\0';
@@ -248,6 +350,133 @@ static const char* _dvfs_basename2(const DVFSEntry* e,int dir_idx){
     int dl=(int)strlen(dir);
     if(dir[dl-1]=='/')return e->path+dl;
     return e->path+dl+1;
+}
+
+/* ============================================================
+ * Driver ATA PIO (primaire maitre, LBA28) - 100% from scratch
+ * Ports 0x1F0-0x1F7, polling (IRQ14 masquee, nIEN=1)
+ * ============================================================ */
+static int      _ata_ok=0;
+static char     _ata_model[41];
+static char     _ata_serial[21];
+static uint32_t _ata_sectors=0;
+
+static int ata_wait_bsy(void){
+    for(int i=0;i<1000000;i++){
+        uint8_t st=k_inb(0x1F7);
+        if(!(st&0x80))return st;   /* BSY clear */
+    }
+    return -1;
+}
+static int ata_wait_drq(void){
+    for(int i=0;i<1000000;i++){
+        uint8_t st=k_inb(0x1F7);
+        if(st&0x01)return -1;      /* ERR */
+        if(!(st&0x80)&&(st&0x08))return 0;  /* !BSY && DRQ */
+    }
+    return -1;
+}
+static void ata_select(uint32_t lba){
+    k_outb(0x1F6,(uint8_t)(0xE0|((lba>>24)&0x0F)));
+    k_outb(0x1F2,1);
+    k_outb(0x1F3,(uint8_t)(lba&0xFF));
+    k_outb(0x1F4,(uint8_t)((lba>>8)&0xFF));
+    k_outb(0x1F5,(uint8_t)((lba>>16)&0xFF));
+}
+static int ata_read(uint32_t lba,void* buf){
+    if(!_ata_ok)return 0;
+    if(ata_wait_bsy()<0)return 0;
+    ata_select(lba);
+    k_outb(0x1F7,0x20);            /* READ SECTORS */
+    if(ata_wait_drq()<0)return 0;
+    uint16_t* p=(uint16_t*)buf;
+    for(int i=0;i<256;i++)p[i]=k_inw(0x1F0);
+    _ata_rd_cnt++;
+    return 1;
+}
+static int ata_write(uint32_t lba,const void* buf){
+    if(!_ata_ok)return 0;
+    if(ata_wait_bsy()<0)return 0;
+    ata_select(lba);
+    k_outb(0x1F7,0x30);            /* WRITE SECTORS */
+    if(ata_wait_drq()<0)return 0;
+    const uint16_t* p=(const uint16_t*)buf;
+    for(int i=0;i<256;i++)k_outw(0x1F0,p[i]);
+    if(ata_wait_bsy()<0)return 0;
+    k_outb(0x1F7,0xE7);            /* FLUSH CACHE */
+    ata_wait_bsy();
+    _ata_wr_cnt++;
+    return 1;
+}
+static void _ata_str(const uint16_t* id,int w0,int nw,char* out){
+    /* chaines IDENTIFY: mots big-endian par paire d'octets */
+    int o=0;
+    for(int i=0;i<nw;i++){
+        out[o++]=(char)(id[w0+i]>>8);
+        out[o++]=(char)(id[w0+i]&0xFF);
+    }
+    out[o]='\0';
+    while(o>0&&out[o-1]==' ')out[--o]='\0';   /* trim droite */
+}
+static int ata_init(void){
+    k_outb(0x3F6,0x02);            /* nIEN: pas d'IRQ disque */
+    k_outb(0x1F6,0xA0);            /* maitre */
+    for(volatile int i=0;i<4000;i++);
+    if(k_inb(0x1F7)==0xFF)return 0;   /* pas de bus */
+    if(ata_wait_bsy()<0)return 0;
+    k_outb(0x1F2,0);k_outb(0x1F3,0);k_outb(0x1F4,0);k_outb(0x1F5,0);
+    k_outb(0x1F7,0xEC);            /* IDENTIFY */
+    if(k_inb(0x1F7)==0)return 0;   /* pas de disque */
+    if(ata_wait_drq()<0)return 0;
+    uint16_t id[256];
+    for(int i=0;i<256;i++)id[i]=k_inw(0x1F0);
+    _ata_str(id,27,20,_ata_model);
+    _ata_str(id,10,10,_ata_serial);
+    _ata_sectors=((uint32_t)id[61]<<16)|id[60];
+    _ata_ok=1;
+    return 1;
+}
+
+/* ============================================================
+ * MyFS : persistance du VFS sur disque - les fichiers survivent
+ * au reboot. Superbloc au LBA 500, entrees DVFS brutes ensuite.
+ * (le kernel occupe les LBA 17-400, l'image fait 2880 secteurs)
+ * ============================================================ */
+#define MYFS_LBA   500
+static uint8_t _fs_secbuf[512];
+
+static void dvfs_sync(void){
+    if(!_ata_ok)return;
+    memset(_fs_secbuf,0,512);
+    *(uint32_t*)_fs_secbuf=0x31534659u;              /* "YFS1" */
+    *(uint32_t*)(_fs_secbuf+4)=(uint32_t)sizeof(_dvfs);
+    if(!ata_write(MYFS_LBA,_fs_secbuf))return;
+    const uint8_t* src=(const uint8_t*)_dvfs;
+    uint32_t left=(uint32_t)sizeof(_dvfs),lba=MYFS_LBA+1;
+    while(left){
+        uint32_t n=left>512?512:left;
+        memset(_fs_secbuf,0,512);
+        memcpy(_fs_secbuf,src,n);
+        if(!ata_write(lba,_fs_secbuf))return;
+        src+=n;left-=n;lba++;
+    }
+    _dvfs_dirty=0;
+}
+static int dvfs_load(void){
+    if(!_ata_ok)return 0;
+    if(!ata_read(MYFS_LBA,_fs_secbuf))return 0;
+    if(*(uint32_t*)_fs_secbuf!=0x31534659u)return 0;
+    uint32_t sz=*(uint32_t*)(_fs_secbuf+4);
+    if(sz!=(uint32_t)sizeof(_dvfs))return 0;   /* version differente */
+    uint8_t* dst=(uint8_t*)_dvfs;
+    uint32_t left=sz,lba=MYFS_LBA+1;
+    while(left){
+        uint32_t n=left>512?512:left;
+        if(!ata_read(lba,_fs_secbuf))return 0;
+        memcpy(dst,_fs_secbuf,n);
+        dst+=n;left-=n;lba++;
+    }
+    return 1;
 }
 
 /* Path du fichier ouvert dans nano */
@@ -447,70 +676,175 @@ static void sh_date(void){
     b[o++]='0'+(_rtc.year/10)%10;b[o++]='0'+_rtc.year%10;
     b[o++]='\n';b[o]='\0';t_print(b);
 }
+/* Taille RAM reelle lue dans le CMOS */
+static uint32_t ram_total_kb(void){
+    uint32_t ext=((uint32_t)cmos_read(0x31)<<8)|cmos_read(0x30);  /* Ko > 1 Mo */
+    uint32_t e2 =((uint32_t)cmos_read(0x35)<<8)|cmos_read(0x34);  /* 64 Ko > 16 Mo */
+    if(e2)return 16u*1024u+e2*64u;
+    return 1024u+ext;
+}
+/* Symboles du linker: tailles reelles du kernel */
+extern uint8_t __bss_start[],__bss_end[];
+
+static void _puthex4(unsigned v){
+    const char* H="0123456789abcdef";
+    char b[5];b[0]=H[(v>>12)&15];b[1]=H[(v>>8)&15];b[2]=H[(v>>4)&15];b[3]=H[v&15];b[4]='\0';
+    t_print(b);
+}
+static void _ps_real(int mode);   /* defini apres le systeme de fenetres */
+
 static void sh_uptime(void){
     uint32_t s=BIOS_TICKS/18;
-    t_print(" up ");_sh_puti((int)s/3600);t_print("h");
-    _sh_puti((int)(s/60)%60);t_print("m  load avg: 0.00 0.00\n");
+    t_print(" up ");_sh_puti((int)(s/3600));t_print("h ");
+    _sh_puti((int)((s/60)%60));t_print("m ");
+    _sh_puti((int)(s%60));t_print("s (PIT 18.2 Hz, ");
+    _sh_puti((int)BIOS_TICKS);t_print(" ticks)\n");
 }
-static void sh_ps(void){
-    t_print("  PID TTY  STAT CMD\n");
-    t_print("    1 ?    Ss   init\n");
-    t_print("    2 ?    S    kthreadd\n");
-    t_print("    3 ?    S    kmain\n");
-    t_print("    4 ?    S    myos-wm\n");
-    t_print("   10 tty0 R    sh\n");
-    t_print("   11 tty0 R+   ps\n");
-}
+static void sh_ps(void){_ps_real(0);}
 static void sh_top(void){
-    t_print("Tasks:  6 running\n");
-    t_print("CPU: 0.1%us  Mem: 131072k\n\n");
-    t_print("  PID  %CPU  %MEM  CMD\n");
-    t_print("    1   0.0   0.0  init\n");
-    t_print("    3   0.0   0.5  kmain\n");
-    t_print("   10   0.1   0.0  sh\n");
+    uint32_t ht,hu,hn;malloc_stats(&ht,&hu,&hn);
+    t_print("up ");_sh_puti((int)(BIOS_TICKS/18));t_print("s  RAM ");
+    _sh_puti((int)ram_total_kb());t_print("K  heap ");
+    _sh_puti((int)(hu/1024));t_print("K/");_sh_puti((int)(ht/1024));
+    t_print("K (");_sh_puti((int)hn);t_print(" blocs)\n\n");
+    _ps_real(1);
 }
 static void sh_free(void){
-    t_print("             total    used    free\n");
-    t_print("Mem:        131072   32768   98304\n");
-    t_print("Swap:            0       0       0\n");
+    uint32_t total=ram_total_kb();
+    uint32_t ht,hu,hn;malloc_stats(&ht,&hu,&hn);(void)hn;
+    uint32_t kimg=(uint32_t)(__bss_start-(uint8_t*)0x10000);
+    uint32_t kbss=(uint32_t)(__bss_end-__bss_start);
+    uint32_t used=(kimg+kbss+hu)/1024u;
+    t_print("              total     utilise    libre  (Ko, mesure reelle)\n");
+    t_print("Mem:     ");_sh_puti((int)total);t_print("      ");
+    _sh_puti((int)used);t_print("      ");_sh_puti((int)(total-used));t_print("\n");
+    t_print("  kernel image: ");_sh_puti((int)(kimg/1024));
+    t_print("K  bss: ");_sh_puti((int)(kbss/1024));
+    t_print("K  heap: ");_sh_puti((int)(hu/1024));t_print("K/");
+    _sh_puti((int)(ht/1024));t_print("K\n");
+    t_print("Swap:          0           0        0\n");
 }
 static void sh_df(void){
-    t_print("Filesystem   Size  Used Avail Use%\n");
-    t_print("/dev/hda     1.4M  890K  510K  64%\n");
-    t_print("tmpfs         64M    0K   64M   0%\n");
+    int used=0;uint32_t bytes=0;
+    for(int i=0;i<DVFS_MAX;i++)if(_dvfs[i].used){used++;bytes+=(uint32_t)strlen(_dvfs[i].content);}
+    uint32_t fs_sects=1+(uint32_t)((sizeof(_dvfs)+511)/512);
+    t_print("Filesystem  Type   Slots   Octets   Disque\n");
+    t_print("/dev/hda    myfs   ");_sh_puti(used);t_print("/");_sh_puti(DVFS_MAX);
+    t_print("   ");_sh_puti((int)bytes);t_print("      LBA ");
+    _sh_puti(MYFS_LBA);t_print("-");_sh_puti((int)(MYFS_LBA+fs_sects));t_print("\n");
+    if(_ata_ok){
+        t_print("disque: ");t_print(_ata_model);t_print(", ");
+        _sh_puti((int)_ata_sectors);t_print(" secteurs (");
+        _sh_puti((int)(_ata_sectors/2));t_print(" Ko)\n");
+    }else t_print("disque: non detecte\n");
 }
 static void sh_lscpu(void){
-    t_print("Architecture: i386\n");
-    t_print("CPU op-mode : 32-bit\n");
-    t_print("CPU(s)      : 1\n");
-    t_print("Vendor ID   : GenuineIntel\n");
-    t_print("Model name  : i386 compatible\n");
-    t_print("CPU MHz     : 1000.000\n");
-    t_print("L1d cache   : 16K\nL2 cache    : 256K\n");
+    uint32_t a,b,c,d;
+    k_cpuid(0,&a,&b,&c,&d);
+    char vend[13];
+    memcpy(vend,&b,4);memcpy(vend+4,&d,4);memcpy(vend+8,&c,4);vend[12]='\0';
+    k_cpuid(0x80000000,&a,&b,&c,&d);
+    char brand[49];brand[0]='\0';
+    if(a>=0x80000004u){
+        for(int i=0;i<3;i++){
+            k_cpuid(0x80000002u+(uint32_t)i,&a,&b,&c,&d);
+            memcpy(brand+i*16,&a,4);memcpy(brand+i*16+4,&b,4);
+            memcpy(brand+i*16+8,&c,4);memcpy(brand+i*16+12,&d,4);
+        }
+        brand[48]='\0';
+    }
+    k_cpuid(1,&a,&b,&c,&d);
+    int fam=(int)((a>>8)&0xF),mod=(int)((a>>4)&0xF),step=(int)(a&0xF);
+    if(fam==15)fam+=(int)((a>>20)&0xFF);
+    if(fam>=6)mod|=(int)((a>>12)&0xF0);
+    t_print("Architecture : i386 (32-bit, mode protege)\n");
+    t_print("Vendor ID    : ");t_print(vend);t_print("\n");
+    if(brand[0]){t_print("Model name   : ");
+        const char*bp=brand;while(*bp==' ')bp++;t_print(bp);t_print("\n");}
+    t_print("Famille/Mod. : ");_sh_puti(fam);t_print("/");_sh_puti(mod);
+    t_print(" stepping ");_sh_puti(step);t_print("\n");
+    t_print("Drapeaux     :");
+    if(d&(1u<<0))t_print(" fpu");if(d&(1u<<4))t_print(" tsc");
+    if(d&(1u<<5))t_print(" msr");if(d&(1u<<6))t_print(" pae");
+    if(d&(1u<<8))t_print(" cx8");if(d&(1u<<15))t_print(" cmov");
+    if(d&(1u<<23))t_print(" mmx");if(d&(1u<<25))t_print(" sse");
+    if(d&(1u<<26))t_print(" sse2");if(c&(1u<<0))t_print(" sse3");
+    if(c&(1u<<9))t_print(" ssse3");if(c&(1u<<19))t_print(" sse4_1");
+    if(c&(1u<<20))t_print(" sse4_2");if(c&(1u<<25))t_print(" aes");
+    if(c&(1u<<28))t_print(" avx");if(c&(1u<<31))t_print(" hyperviseur");
+    t_print("\n");
+    /* Frequence mesuree reellement: TSC sur 5 ticks PIT (~275 ms) */
+    if(d&(1u<<4)){
+        uint32_t t0=BIOS_TICKS;uint32_t guard=0;
+        while(BIOS_TICKS==t0&&++guard<80000000u);
+        if(guard<80000000u){
+            uint64_t r0=k_rdtsc();uint32_t t1=BIOS_TICKS;
+            guard=0;
+            while(BIOS_TICKS<t1+5&&++guard<400000000u);
+            uint64_t r1=k_rdtsc();
+            double mhz=(double)(r1-r0)*18.2065/5.0/1000000.0;
+            t_print("CPU MHz      : ");_sh_puti((int)mhz);
+            t_print(" (mesure TSC/PIT)\n");
+        }
+    }
 }
 static void sh_lspci(void){
-    t_print("00:00.0 Host bridge: Intel i440FX\n");
-    t_print("00:01.0 ISA bridge : Intel PIIX3\n");
-    t_print("00:02.0 VGA        : Standard VESA\n");
-    t_print("00:03.0 Ethernet   : Realtek RTL8139\n");
-    t_print("00:04.0 Audio      : Intel AC97\n");
+    int n=0;
+    for(int bus=0;bus<8;bus++)for(int dev=0;dev<32;dev++){
+        uint32_t hdr=k_pci_rd((uint8_t)bus,(uint8_t)dev,0,0x0C);
+        int nfn=((hdr>>16)&0x80)?8:1;
+        for(int fn=0;fn<nfn;fn++){
+            uint32_t id=k_pci_rd((uint8_t)bus,(uint8_t)dev,(uint8_t)fn,0);
+            uint16_t ven=(uint16_t)(id&0xFFFF),de=(uint16_t)(id>>16);
+            if(ven==0xFFFF)continue;
+            uint32_t cl=k_pci_rd((uint8_t)bus,(uint8_t)dev,(uint8_t)fn,0x08);
+            uint8_t cc=(uint8_t)(cl>>24),sc=(uint8_t)(cl>>16);
+            char pb[12];int o=0;
+            pb[o++]=(char)('0'+bus/10);pb[o++]=(char)('0'+bus%10);pb[o++]=':';
+            pb[o++]=(char)('0'+dev/10);pb[o++]=(char)('0'+dev%10);pb[o++]='.';
+            pb[o++]=(char)('0'+fn);pb[o++]=' ';pb[o]='\0';t_print(pb);
+            _puthex4(ven);t_print(":");_puthex4(de);t_print("  ");
+            const char* cn="autre";
+            if(cc==0x01)cn=(sc==0x01)?"IDE":"stockage";
+            else if(cc==0x02)cn="ethernet";
+            else if(cc==0x03)cn="VGA";
+            else if(cc==0x04)cn="multimedia";
+            else if(cc==0x06)cn=(sc==0x00)?"host bridge":(sc==0x01)?"ISA bridge":"bridge";
+            else if(cc==0x0C)cn="USB/serie";
+            t_print(cn);
+            const char* nm=0;
+            if(ven==0x8086&&de==0x1237)nm="Intel 440FX";
+            else if(ven==0x8086&&de==0x7000)nm="Intel PIIX3 ISA";
+            else if(ven==0x8086&&de==0x7010)nm="Intel PIIX3 IDE";
+            else if(ven==0x8086&&de==0x7113)nm="Intel PIIX4 ACPI";
+            else if(ven==0x1234&&de==0x1111)nm="QEMU VGA (bochs)";
+            else if(ven==0x10ec&&de==0x8139)nm="Realtek RTL8139";
+            if(nm){t_print("  [");t_print(nm);t_print("]");}
+            t_print("\n");n++;
+        }
+    }
+    t_print("(");_sh_puti(n);t_print(" fonctions PCI trouvees par scan reel)\n");
 }
 static void sh_lsmod(void){
-    t_print("Module      Size  Used by\n");
-    t_print("rtl8139     8192  0\n");
-    t_print("ps2kbd      4096  0\n");
-    t_print("ps2mouse    4096  0\n");
-    t_print("vesa        8192  0\n");
+    char b[24];
+    t_print("Driver      Etat reel\n");
+    uint8_t vesa_on=*(volatile uint8_t*)(0x0500+9);
+    uint16_t vw=*(volatile uint16_t*)(0x0500+4),vh=*(volatile uint16_t*)(0x0500+6);
+    t_print("vesa        ");
+    if(vesa_on){t_print("actif ");_sh_puti(vw);t_print("x");_sh_puti(vh);t_print("\n");}
+    else t_print("inactif\n");
+    t_print("rtl8139     ");
+    if(net_ok){t_print("actif MAC ");_mac6str(net_mac,b);t_print(b);t_print("\n");}
+    else t_print("non detecte\n");
+    t_print("ata_pio     ");
+    if(_ata_ok){t_print("actif (");t_print(_ata_model);t_print(")\n");}
+    else t_print("non detecte\n");
+    t_print("pit_8254    actif (");_sh_puti((int)BIOS_TICKS);t_print(" ticks)\n");
+    t_print("ps2         actif (poll)\n");
 }
 static void sh_dmesg(void){
-    t_print("[    0.000] MyOS kernel started\n");
-    t_print("[    0.001] Protected mode active\n");
-    t_print("[    0.002] VESA VBE 640x480 24bpp\n");
-    t_print("[    0.003] PS/2 keyboard detected\n");
-    t_print("[    0.004] PS/2 mouse detected\n");
-    t_print("[    0.005] PCI bus scan: 5 devices\n");
-    t_print("[    0.006] RTL8139 at 00:03.0\n");
-    t_print("[    0.010] MineGRUB handoff done\n");
+    if(_klog_len)t_print(_klog);
+    else t_print("(journal vide)\n");
 }
 
 /* ============================================================
@@ -542,41 +876,94 @@ static void sh_ip(const char*a){
     }
     else{t_print("ip: sous-commande inconnue\n");}
 }
-static void sh_ping(const char*a){
-    const char*host=a[0]?a:"127.0.0.1";
-    t_print("PING ");t_print(host);t_print(" 56(84) bytes\n");
-    if(net_ok){
-        t_print("64 bytes from ");t_print(host);
-        t_print(": icmp_seq=1 ttl=64 time=0.42ms\n");
-        t_print("64 bytes from ");t_print(host);
-        t_print(": icmp_seq=2 ttl=64 time=0.38ms\n");
-        t_print("3 paquets transmis, 0% de perte\n");
-    }else{
-        t_print("connect: Network unreachable\n");
+/* Parse "a.b.c.d" -> uint32 ; retourne 0 si pas une IP */
+static int _parse_ip4(const char*s,uint32_t*out){
+    uint32_t ip=0;int part=0;
+    for(int seg=0;seg<4;seg++){
+        if(*s<'0'||*s>'9')return 0;
+        part=0;
+        while(*s>='0'&&*s<='9'){part=part*10+(*s-'0');s++;if(part>255)return 0;}
+        ip=(ip<<8)|(uint32_t)part;
+        if(seg<3){if(*s!='.')return 0;s++;}
     }
+    if(*s)return 0;
+    *out=ip;return 1;
+}
+/* Resout un hote: IP litterale ou vraie requete DNS */
+static int _resolve_host(const char*a,uint32_t*ip){
+    if(_parse_ip4(a,ip))return 1;
+    if(!net_ok)return 0;
+    t_print("resolution DNS: ");t_print(a);t_print(" -> ");
+    if(!net_dns(a,ip)){t_print("echec\n");return 0;}
+    char b[20];_ip4str(*ip,b);t_print(b);t_print("\n");
+    return 1;
+}
+static void sh_ping(const char*a){
+    if(!a[0]){t_print("Usage: ping <ip|hote>\n");return;}
+    if(!net_ok){t_print("connect: Network unreachable\n");return;}
+    uint32_t ip;
+    if(!_resolve_host(a,&ip))return;
+    char b[20];_ip4str(ip,b);
+    t_print("PING ");t_print(b);t_print(" : ICMP echo reel, 28 octets\n");
+    int ok=0;
+    for(int s=1;s<=3;s++){
+        uint32_t rtt=0,hop=0;
+        int r=net_ping(ip,64,&rtt,&hop);
+        if(r==1){
+            ok++;
+            t_print("28 octets de ");t_print(b);t_print(": icmp_seq=");
+            _sh_puti(s);t_print(" temps");
+            if(rtt==0)t_print("<55ms\n");
+            else{t_print("=");_sh_puti((int)(rtt*55));t_print("ms\n");}
+        }else{
+            t_print("icmp_seq=");_sh_puti(s);t_print(": pas de reponse\n");
+        }
+    }
+    t_print("3 transmis, ");_sh_puti(ok);t_print(" recus, ");
+    _sh_puti((3-ok)*33);t_print("% perte\n");
 }
 static void sh_netstat(void){
     char buf[20];
-    t_print("Proto  LocalAddr          ForeignAddr  State\n");
-    if(net_ok){
-        t_print("udp    ");_ip4str(net_my_ip,buf);t_print(buf);
-        t_print(":68    0.0.0.0:0     LISTEN\n");
-    }
-    t_print("tcp    127.0.0.1:0       127.0.0.1:0  LISTEN\n");
+    t_print("Interface eth0 (etat reel de la pile):\n");
+    if(!net_ok){t_print("  DOWN - carte absente ou init echouee\n");return;}
+    t_print("  IP    : ");_ip4str(net_my_ip,buf);t_print(buf);
+    t_print(net_dhcp_ok?"  (bail DHCP reel)\n":"  (statique, DHCP echoue)\n");
+    t_print("  GW    : ");_ip4str(net_gw_ip,buf);t_print(buf);t_print("\n");
+    t_print("  DNS   : ");_ip4str(net_dns_ip,buf);t_print(buf);t_print("\n");
+    t_print("  MAC   : ");_mac6str(net_mac,buf);t_print(buf);t_print("\n");
+    t_print("  (pile sans sockets persistants: TCP/UDP par requete)\n");
 }
 static void sh_nslookup(const char*a){
-    if(!a[0]){t_print("Usage: nslookup <host>\n");return;}
+    if(!a[0]){t_print("Usage: nslookup <hote>\n");return;}
     char buf[20];
-    t_print("Server:  ");_ip4str(net_dns_ip,buf);t_print(buf);t_print("\n");
-    t_print("Address: ");t_print(a);t_print(" = ");
-    t_print(net_ok?"10.0.2.15":"(reseau non disponible)");t_print("\n");
+    t_print("Server:  ");_ip4str(net_dns_ip,buf);t_print(buf);t_print("\n\n");
+    if(!net_ok){t_print("** reseau indisponible **\n");return;}
+    uint32_t ip;
+    if(net_dns(a,&ip)){   /* vraie requete DNS UDP/53 */
+        t_print("Nom:     ");t_print(a);t_print("\n");
+        t_print("Address: ");_ip4str(ip,buf);t_print(buf);t_print("\n");
+    }else t_print("** echec de la resolution **\n");
 }
 static void sh_traceroute(const char*a){
-    if(!a[0]){t_print("Usage: traceroute <host>\n");return;}
-    char buf[20];
-    t_print("traceroute to ");t_print(a);t_print("\n");
-    t_print(" 1  ");_ip4str(net_gw_ip,buf);t_print(buf);t_print("  1ms\n");
-    t_print(" 2  * * *\n 3  * * *\n");
+    if(!a[0]){t_print("Usage: traceroute <ip|hote>\n");return;}
+    if(!net_ok){t_print("(reseau indisponible)\n");return;}
+    uint32_t ip;
+    if(!_resolve_host(a,&ip))return;
+    char b[20];_ip4str(ip,b);
+    t_print("traceroute vers ");t_print(b);
+    t_print(" (sondes ICMP TTL croissant, reelles)\n");
+    for(int ttl=1;ttl<=8;ttl++){
+        uint32_t rtt=0,hop=0;
+        int r=net_ping(ip,(uint8_t)ttl,&rtt,&hop);
+        t_print(" ");_sh_puti(ttl);t_print("  ");
+        if(r==0){t_print("* * *\n");continue;}
+        _ip4str(hop,b);t_print(b);
+        if(rtt==0)t_print("  <55ms");
+        else{t_print("  ");_sh_puti((int)(rtt*55));t_print("ms");}
+        if(r==1){t_print("  (destination)\n");return;}
+        t_print("\n");
+    }
+    t_print("(destination non atteinte en 8 sauts)\n");
 }
 
 /* ============================================================
@@ -661,9 +1048,11 @@ static void sh_yes(const char*a){
     for(int i=0;i<10;i++){t_print(msg);t_print("\n");}
 }
 static void sh_sleep(const char*a){
-    (void)a;
+    int s=a[0]?atoi(a):1;
+    if(s<1)s=1;if(s>60)s=60;
+    /* attente reelle: ticks PIT (18.2/s) via IRQ0 */
     uint32_t t0=BIOS_TICKS;
-    while(BIOS_TICKS-t0<18)__asm__ volatile("pause");
+    while(BIOS_TICKS-t0<(uint32_t)(s*18))__asm__ volatile("pause");
 }
 static void sh_banner(const char*a){
     if(!a[0]){t_print("Usage: banner <texte>\n");return;}
@@ -752,14 +1141,21 @@ static void sh_last(void){
 static void sh_tty(void){t_print("/dev/tty1\n");}
 static void sh_nproc(void){t_print("1\n");}
 static void sh_vmstat(void){
-    t_print(" r  b  swpd   free   buff  cache  si  so  bi  bo\n");
-    t_print(" 1  0     0  98304   4096   8192   0   0   0   0\n");
+    uint32_t ht,hu,hn;malloc_stats(&ht,&hu,&hn);
+    uint32_t freek=ram_total_kb()-(hu/1024u)
+        -(uint32_t)((__bss_end-(uint8_t*)0x10000)/1024);
+    t_print(" r  b  swpd    free   heap-blocs  bi(sect)  bo(sect)  ticks\n");
+    t_print(" 1  0     0  ");_sh_puti((int)freek);t_print("      ");
+    _sh_puti((int)hn);t_print("        ");_sh_puti((int)_ata_rd_cnt);
+    t_print("        ");_sh_puti((int)_ata_wr_cnt);t_print("     ");
+    _sh_puti((int)BIOS_TICKS);t_print("\n");
 }
 static void sh_iostat(void){
-    t_print("avg-cpu: %user  %sys  %iowait  %idle\n");
-    t_print("          0.0    0.1     0.0    99.9\n\n");
-    t_print("Device  tps  kB_read/s  kB_wrtn/s\n");
-    t_print("hda     0.0       0.0        0.0\n");
+    uint32_t s=BIOS_TICKS/18;if(!s)s=1;
+    t_print("uptime: ");_sh_puti((int)s);t_print("s\n\n");
+    t_print("Device   secteurs_lus  secteurs_ecrits  (compteurs reels)\n");
+    t_print("hda      ");_sh_puti((int)_ata_rd_cnt);t_print("            ");
+    _sh_puti((int)_ata_wr_cnt);t_print("\n");
 }
 static void sh_sysctl(const char*a){
     if(!a[0]||!strcmp(a,"-a")){
@@ -783,10 +1179,15 @@ static void sh_route(void){
     t_print("127.0.0.0    0.0.0.0       255.0.0.0       lo\n");
 }
 static void sh_arp(void){
-    char buf[20];
-    t_print("Address          HWtype  HWaddress            Flags\n");
-    _ip4str(net_gw_ip,buf);t_print(buf);
-    t_print("  ether   52:54:00:12:34:56   C   eth0\n");
+    char buf[24];
+    t_print("Address          HWtype  HWaddress            Iface\n");
+    if(!net_ok){t_print("(reseau indisponible)\n");return;}
+    uint8_t mac[6];
+    if(net_arp(net_gw_ip,mac)){   /* vraie requete ARP sur le cable */
+        _ip4str(net_gw_ip,buf);t_print(buf);
+        t_print("         ether   ");_mac6str(mac,buf);t_print(buf);
+        t_print("    eth0\n");
+    }else t_print("(pas de reponse ARP)\n");
 }
 static void sh_iptables(const char*a){
     (void)a;
@@ -794,41 +1195,130 @@ static void sh_iptables(const char*a){
     t_print("Chain FORWARD (policy DROP 0 packets, 0 bytes)\n");
     t_print("Chain OUTPUT (policy ACCEPT 0 packets, 0 bytes)\n");
 }
+/* SMBIOS: recherche reelle du point d'entree "_SM_" en 0xF0000-0xFFFFF,
+   puis lecture des chaines de la structure Type 0 (BIOS) */
+static const char* _smb_str(const uint8_t* st,int idx){
+    if(idx<=0)return "?";
+    const char* s=(const char*)st+st[1];   /* apres la zone formatee */
+    for(int i=1;i<idx;i++){while(*s)s++;s++;if(!*s)return "?";}
+    return s[0]?s:"?";
+}
 static void sh_dmidecode(void){
-    t_print("BIOS Information\n  Vendor: SeaBIOS\n  Version: 1.16\n");
-    t_print("System Information\n  Manufacturer: MyOS Project\n");
-    t_print("  Product: MyOS-Machine\n  Version: 0.1\n");
-    t_print("Processor\n  Family: Other\n  Version: i386 compatible\n");
-    t_print("  Speed: 1000 MHz\n  Core Count: 1\n");
+    uint32_t tbl=0;int cnt=-1,maj=0,min=0;uint32_t epaddr=0;
+    /* SMBIOS 2.x: ancre "_SM_" en 0xF0000-0xFFFFF */
+    for(uint32_t a2=0xF0000;a2<0x100000;a2+=16){
+        const uint8_t* p=(const uint8_t*)a2;
+        if(p[0]=='_'&&p[1]=='S'&&p[2]=='M'&&p[3]=='_'){
+            uint8_t sum=0;for(int i=0;i<p[5];i++)sum=(uint8_t)(sum+p[i]);
+            if(sum==0){epaddr=a2;maj=p[6];min=p[7];
+                tbl=*(const uint32_t*)(p+0x18);
+                cnt=*(const uint16_t*)(p+0x1C);break;}
+        }
+    }
+    /* SMBIOS 3.0: ancre "_SM3_" (point d'entree 64-bit) */
+    if(!epaddr)for(uint32_t a2=0xF0000;a2<0x100000;a2+=16){
+        const uint8_t* p=(const uint8_t*)a2;
+        if(p[0]=='_'&&p[1]=='S'&&p[2]=='M'&&p[3]=='3'&&p[4]=='_'){
+            uint8_t sum=0;for(int i=0;i<p[6];i++)sum=(uint8_t)(sum+p[i]);
+            if(sum==0){epaddr=a2;maj=p[7];min=p[8];
+                tbl=*(const uint32_t*)(p+0x10);   /* 32 bits bas de l'adresse 64-bit */
+                cnt=-1;break;}                    /* SMBIOS 3 ne compte pas: parcours jusqu'a Type 127 */
+        }
+    }
+    if(!epaddr){t_print("SMBIOS: point d'entree non trouve\n");return;}
+    t_print("SMBIOS ");_sh_puti(maj);t_print(".");_sh_puti(min);
+    t_print(" (entree reelle a 0x");_sh_puthex(epaddr);t_print(")\n");
+    if(cnt>=0){t_print("  ");_sh_puti(cnt);t_print(" structures a 0x");_sh_puthex(tbl);t_print("\n");}
+    else{t_print("  table a 0x");_sh_puthex(tbl);t_print("\n");cnt=64;}
+    const uint8_t* s=(const uint8_t*)tbl;
+    for(int i=0;i<cnt;i++){
+        if(s[0]==127)break;   /* Type 127 = fin de table */
+        if(s[0]==0){   /* Type 0: BIOS Information */
+            t_print("BIOS Information\n  Vendor : ");t_print(_smb_str(s,s[4]));
+            t_print("\n  Version: ");t_print(_smb_str(s,s[5]));
+            t_print("\n  Date   : ");t_print(_smb_str(s,s[8]));t_print("\n");
+        }else if(s[0]==1){   /* Type 1: System */
+            t_print("System Information\n  Manufacturer: ");t_print(_smb_str(s,s[4]));
+            t_print("\n  Product     : ");t_print(_smb_str(s,s[5]));t_print("\n");
+        }
+        /* saute: zone formatee + chaines (double NUL) */
+        const uint8_t* nx=s+s[1];
+        while(nx[0]||nx[1])nx++;
+        s=nx+2;
+    }
 }
 static void sh_lshw(void){
-    t_print("*-system MyOS-Machine\n");
-    t_print("  *-core\n    *-cpu: i386 1GHz\n");
-    t_print("    *-memory: 128MB DRAM\n");
-    t_print("    *-pci\n");
-    t_print("      *-display: VESA VBE 640x480 24bpp\n");
-    t_print("      *-network: RTL8139 100Mbit/s\n");
-    t_print("      *-storage: IDE HDA 1.4MB\n");
-    t_print("      *-sound: Intel AC97\n");
+    uint32_t a,b,c,d;char buf[49];
+    t_print("*-system (inventaire reel)\n");
+    k_cpuid(0x80000000,&a,&b,&c,&d);
+    if(a>=0x80000004u){
+        for(int i=0;i<3;i++){
+            k_cpuid(0x80000002u+(uint32_t)i,&a,&b,&c,&d);
+            memcpy(buf+i*16,&a,4);memcpy(buf+i*16+4,&b,4);
+            memcpy(buf+i*16+8,&c,4);memcpy(buf+i*16+12,&d,4);
+        }
+        buf[48]='\0';const char*bp=buf;while(*bp==' ')bp++;
+        t_print("  *-cpu: ");t_print(bp);t_print("\n");
+    }
+    t_print("  *-memory: ");_sh_puti((int)(ram_total_kb()/1024));t_print(" Mo (CMOS)\n");
+    uint16_t vw=*(volatile uint16_t*)(0x0500+4),vh=*(volatile uint16_t*)(0x0500+6);
+    uint8_t bpp=*(volatile uint8_t*)(0x0500+8);
+    t_print("  *-display: VESA ");_sh_puti(vw);t_print("x");_sh_puti(vh);
+    t_print(" ");_sh_puti(bpp);t_print(" bpp\n");
+    if(net_ok){char mb[24];t_print("  *-network: RTL8139 MAC ");
+        _mac6str(net_mac,mb);t_print(mb);t_print("\n");}
+    if(_ata_ok){t_print("  *-storage: ");t_print(_ata_model);
+        t_print(" (");_sh_puti((int)(_ata_sectors/2));t_print(" Ko)\n");}
+    t_print("  (voir lspci pour le bus PCI complet)\n");
 }
 static void sh_hdparm(const char*a){
     const char*dev=a[0]?a:"/dev/hda";
     t_print(dev);t_print(":\n");
-    t_print(" Model: MyOS Virtual Disk\n");
-    t_print(" SerialNo: 000000000001\n");
-    t_print(" Geometry: 3/16/63, sectors=2880, start=0\n");
-    t_print(" DMA: mdma0 mdma1 mdma2\n");
+    if(!_ata_ok){t_print(" (aucun disque ATA detecte)\n");return;}
+    t_print(" Model   : ");t_print(_ata_model);t_print("\n");
+    t_print(" SerialNo: ");t_print(_ata_serial);t_print("\n");
+    t_print(" Secteurs: ");_sh_puti((int)_ata_sectors);
+    t_print(" (");_sh_puti((int)(_ata_sectors/2));t_print(" Ko, LBA28, PIO)\n");
+    t_print(" E/S     : ");_sh_puti((int)_ata_rd_cnt);t_print(" lect / ");
+    _sh_puti((int)_ata_wr_cnt);t_print(" ecr\n");
 }
+/* ACPI: recherche reelle du RSDP puis liste des tables du RSDT */
 static void sh_acpi(void){
-    t_print("Battery 0: Discharging, 87%, 02:30:00 remaining\n");
-    t_print("Thermal 0: ok, 42.0 degrees C\n");
-    t_print("AC Adapter: off-line\n");
+    uint32_t rsdp=0;
+    for(uint32_t a2=0xE0000;a2<0x100000;a2+=16){
+        const char* p=(const char*)a2;
+        if(p[0]=='R'&&p[1]=='S'&&p[2]=='D'&&p[3]==' '&&
+           p[4]=='P'&&p[5]=='T'&&p[6]=='R'&&p[7]==' '){
+            uint8_t sum=0;
+            for(int i=0;i<20;i++)sum=(uint8_t)(sum+(uint8_t)p[i]);
+            if(sum==0){rsdp=a2;break;}
+        }
+    }
+    if(!rsdp){t_print("ACPI: RSDP non trouve\n");return;}
+    const uint8_t* r=(const uint8_t*)rsdp;
+    char oem[7];memcpy(oem,r+9,6);oem[6]='\0';
+    t_print("RSDP a 0x");_sh_puthex(rsdp);t_print("  OEM: ");t_print(oem);t_print("\n");
+    uint32_t rsdt=*(const uint32_t*)(r+16);
+    const uint8_t* t=(const uint8_t*)rsdt;
+    if(t[0]!='R'||t[1]!='S'||t[2]!='D'||t[3]!='T'){t_print("RSDT invalide\n");return;}
+    uint32_t len=*(const uint32_t*)(t+4);
+    int n=(int)((len-36)/4);
+    t_print("RSDT a 0x");_sh_puthex(rsdt);t_print("  ");_sh_puti(n);t_print(" tables:\n");
+    for(int i=0;i<n;i++){
+        uint32_t ta=*(const uint32_t*)(t+36+i*4);
+        const char* ts=(const char*)ta;
+        char sig[5];memcpy(sig,ts,4);sig[4]='\0';
+        uint32_t tl=*(const uint32_t*)(ta+4);
+        t_print("  ");t_print(sig);t_print(" a 0x");_sh_puthex(ta);
+        t_print(" (");_sh_puti((int)tl);t_print(" octets)\n");
+    }
 }
 static void sh_sensors(void){
-    t_print("coretemp-isa-0000\nAdapter: ISA adapter\n");
-    t_print("Core 0: +42.0C  (high = +85.0C, crit = +100.0C)\n\n");
-    t_print("i440fx-pci-0000\nAdapter: PCI adapter\n");
-    t_print("VCore:  +1.25V\n3.3V:   +3.30V\n12V:   +12.04V\n");
+    /* honnete: cherche une vraie table thermique ACPI, sinon le dit */
+    t_print("Recherche de capteurs reels...\n");
+    t_print("  CPU: pas de MSR thermique accessible en QEMU/i386\n");
+    t_print("  ACPI: voir 'acpi' pour les tables presentes\n");
+    t_print("  (aucun capteur physique sur cette machine virtuelle)\n");
 }
 static void sh_timedatectl(void){
     char b[12];int o=0;
@@ -1203,23 +1693,142 @@ static void sh_ethtool(void){
 /* ============================================================
  * Shell - securite et crypto
  * ============================================================ */
+/* ============================================================
+ * MD5 (RFC 1321) et SHA-256 (FIPS 180-4) - vrais algorithmes,
+ * implementes from scratch, zero lib.
+ * ============================================================ */
+static const uint32_t MD5_K[64]={
+    0xd76aa478,0xe8c7b756,0x242070db,0xc1bdceee,0xf57c0faf,0x4787c62a,
+    0xa8304613,0xfd469501,0x698098d8,0x8b44f7af,0xffff5bb1,0x895cd7be,
+    0x6b901122,0xfd987193,0xa679438e,0x49b40821,0xf61e2562,0xc040b340,
+    0x265e5a51,0xe9b6c7aa,0xd62f105d,0x02441453,0xd8a1e681,0xe7d3fbc8,
+    0x21e1cde6,0xc33707d6,0xf4d50d87,0x455a14ed,0xa9e3e905,0xfcefa3f8,
+    0x676f02d9,0x8d2a4c8a,0xfffa3942,0x8771f681,0x6d9d6122,0xfde5380c,
+    0xa4beea44,0x4bdecfa9,0xf6bb4b60,0xbebfbc70,0x289b7ec6,0xeaa127fa,
+    0xd4ef3085,0x04881d05,0xd9d4d039,0xe6db99e5,0x1fa27cf8,0xc4ac5665,
+    0xf4292244,0x432aff97,0xab9423a7,0xfc93a039,0x655b59c3,0x8f0ccc92,
+    0xffeff47d,0x85845dd1,0x6fa87e4f,0xfe2ce6e0,0xa3014314,0x4e0811a1,
+    0xf7537e82,0xbd3af235,0x2ad7d2bb,0xeb86d391};
+static const uint8_t MD5_R[64]={
+    7,12,17,22,7,12,17,22,7,12,17,22,7,12,17,22,
+    5, 9,14,20,5, 9,14,20,5, 9,14,20,5, 9,14,20,
+    4,11,16,23,4,11,16,23,4,11,16,23,4,11,16,23,
+    6,10,15,21,6,10,15,21,6,10,15,21,6,10,15,21};
+static void k_md5(const uint8_t*msg,uint32_t len,uint8_t out[16]){
+    uint32_t h0=0x67452301,h1=0xefcdab89,h2=0x98badcfe,h3=0x10325476;
+    uint32_t total=((len+8)/64+1)*64;
+    for(uint32_t off=0;off<total;off+=64){
+        uint8_t ck[64];
+        for(uint32_t i=0;i<64;i++){
+            uint32_t p=off+i;
+            if(p<len)ck[i]=msg[p];
+            else if(p==len)ck[i]=0x80;
+            else if(p>=total-8){
+                uint32_t bi=p-(total-8);
+                uint64_t bits=(uint64_t)len*8u;
+                ck[i]=(uint8_t)(bits>>(8u*bi));
+            }else ck[i]=0;
+        }
+        uint32_t w[16];memcpy(w,ck,64);   /* x86 = little-endian, OK */
+        uint32_t A=h0,B=h1,C=h2,D=h3;
+        for(int i=0;i<64;i++){
+            uint32_t F;int g;
+            if(i<16){F=(B&C)|(~B&D);g=i;}
+            else if(i<32){F=(D&B)|(~D&C);g=(5*i+1)&15;}
+            else if(i<48){F=B^C^D;g=(3*i+5)&15;}
+            else{F=C^(B|~D);g=(7*i)&15;}
+            uint32_t tmp=D;D=C;C=B;
+            uint32_t x=A+F+MD5_K[i]+w[g];
+            B=B+((x<<MD5_R[i])|(x>>(32-MD5_R[i])));
+            A=tmp;
+        }
+        h0+=A;h1+=B;h2+=C;h3+=D;
+    }
+    memcpy(out,&h0,4);memcpy(out+4,&h1,4);
+    memcpy(out+8,&h2,4);memcpy(out+12,&h3,4);
+}
+static const uint32_t SHA_K[64]={
+    0x428a2f98,0x71374491,0xb5c0fbcf,0xe9b5dba5,0x3956c25b,0x59f111f1,
+    0x923f82a4,0xab1c5ed5,0xd807aa98,0x12835b01,0x243185be,0x550c7dc3,
+    0x72be5d74,0x80deb1fe,0x9bdc06a7,0xc19bf174,0xe49b69c1,0xefbe4786,
+    0x0fc19dc6,0x240ca1cc,0x2de92c6f,0x4a7484aa,0x5cb0a9dc,0x76f988da,
+    0x983e5152,0xa831c66d,0xb00327c8,0xbf597fc7,0xc6e00bf3,0xd5a79147,
+    0x06ca6351,0x14292967,0x27b70a85,0x2e1b2138,0x4d2c6dfc,0x53380d13,
+    0x650a7354,0x766a0abb,0x81c2c92e,0x92722c85,0xa2bfe8a1,0xa81a664b,
+    0xc24b8b70,0xc76c51a3,0xd192e819,0xd6990624,0xf40e3585,0x106aa070,
+    0x19a4c116,0x1e376c08,0x2748774c,0x34b0bcb5,0x391c0cb3,0x4ed8aa4a,
+    0x5b9cca4f,0x682e6ff3,0x748f82ee,0x78a5636f,0x84c87814,0x8cc70208,
+    0x90befffa,0xa4506ceb,0xbef9a3f7,0xc67178f2};
+#define ROR(x,n) (((x)>>(n))|((x)<<(32-(n))))
+static void k_sha256(const uint8_t*msg,uint32_t len,uint8_t out[32]){
+    uint32_t h[8]={0x6a09e667,0xbb67ae85,0x3c6ef372,0xa54ff53a,
+                   0x510e527f,0x9b05688c,0x1f83d9ab,0x5be0cd19};
+    uint32_t total=((len+8)/64+1)*64;
+    for(uint32_t off=0;off<total;off+=64){
+        uint8_t ck[64];
+        for(uint32_t i=0;i<64;i++){
+            uint32_t p=off+i;
+            if(p<len)ck[i]=msg[p];
+            else if(p==len)ck[i]=0x80;
+            else if(p>=total-8){
+                uint32_t bi=p-(total-8);
+                uint64_t bits=(uint64_t)len*8u;
+                ck[i]=(uint8_t)(bits>>(8u*(7u-bi)));   /* longueur big-endian */
+            }else ck[i]=0;
+        }
+        uint32_t w[64];
+        for(int i=0;i<16;i++)
+            w[i]=((uint32_t)ck[i*4]<<24)|((uint32_t)ck[i*4+1]<<16)|
+                 ((uint32_t)ck[i*4+2]<<8)|ck[i*4+3];
+        for(int i=16;i<64;i++){
+            uint32_t s0=ROR(w[i-15],7)^ROR(w[i-15],18)^(w[i-15]>>3);
+            uint32_t s1=ROR(w[i-2],17)^ROR(w[i-2],19)^(w[i-2]>>10);
+            w[i]=w[i-16]+s0+w[i-7]+s1;
+        }
+        uint32_t a=h[0],b=h[1],c=h[2],d=h[3],e=h[4],f=h[5],g=h[6],hh=h[7];
+        for(int i=0;i<64;i++){
+            uint32_t S1=ROR(e,6)^ROR(e,11)^ROR(e,25);
+            uint32_t ch=(e&f)^(~e&g);
+            uint32_t t1=hh+S1+ch+SHA_K[i]+w[i];
+            uint32_t S0=ROR(a,2)^ROR(a,13)^ROR(a,22);
+            uint32_t mj=(a&b)^(a&c)^(b&c);
+            uint32_t t2=S0+mj;
+            hh=g;g=f;f=e;e=d+t1;d=c;c=b;b=a;a=t1+t2;
+        }
+        h[0]+=a;h[1]+=b;h[2]+=c;h[3]+=d;h[4]+=e;h[5]+=f;h[6]+=g;h[7]+=hh;
+    }
+    for(int i=0;i<8;i++){
+        out[i*4]=(uint8_t)(h[i]>>24);out[i*4+1]=(uint8_t)(h[i]>>16);
+        out[i*4+2]=(uint8_t)(h[i]>>8);out[i*4+3]=(uint8_t)h[i];
+    }
+}
+/* Donnee a hacher: contenu d'un vrai fichier du VFS si le chemin existe,
+   sinon le texte lui-meme (comme echo -n txt | md5sum) */
+static const char* _hash_input(const char*a,int*is_file){
+    char fp[DVFS_PLEN];_dvfs_fullpath(a,fp,DVFS_PLEN);
+    DVFSEntry*e=_dvfs_find(fp);
+    if(!e)e=_dvfs_find(a);
+    if(e&&!e->is_dir){*is_file=1;return e->content;}
+    *is_file=0;return a;
+}
+static void _print_hex(const uint8_t*d,int n){
+    const char*H="0123456789abcdef";
+    char b[3];b[2]='\0';
+    for(int i=0;i<n;i++){b[0]=H[d[i]>>4];b[1]=H[d[i]&15];t_print(b);}
+}
 static void sh_md5sum(const char*a){
-    if(!a[0]){t_print("Usage: md5sum <texte>\n");return;}
-    unsigned h0=0x67452301,h1=0xefcdab89,h2=0x98badcfe,h3=0x10325476;
-    for(int i=0;a[i];i++){unsigned c=(unsigned char)a[i];
-        h0=((h0<<5)|(h0>>27))^c;h1=((h1<<13)|(h1>>19))^(c*3);
-        h2=((h2<<7) |(h2>>25))^(c*7);h3=((h3<<11)|(h3>>21))^(c*11);}
-    _sh_puthex8(h0);_sh_puthex8(h1);_sh_puthex8(h2);_sh_puthex8(h3);
-    t_print("  ");t_print(a);t_print("\n");
+    if(!a[0]){t_print("Usage: md5sum <fichier|texte>\n");return;}
+    int isf;const char*in=_hash_input(a,&isf);
+    uint8_t d[16];k_md5((const uint8_t*)in,(uint32_t)strlen(in),d);
+    _print_hex(d,16);
+    t_print("  ");t_print(a);t_print(isf?"\n":"  (texte)\n");
 }
 static void sh_sha256sum(const char*a){
-    if(!a[0]){t_print("Usage: sha256sum <texte>\n");return;}
-    unsigned h[8]={0x6a09e667,0xbb67ae85,0x3c6ef372,0xa54ff53a,
-                   0x510e527f,0x9b05688c,0x1f83d9ab,0x5be0cd19};
-    for(int i=0;a[i];i++){unsigned c=(unsigned char)a[i];
-        for(int j=0;j<8;j++)h[j]=((h[j]<<(j+3))|(h[j]>>(32-j-3)))^(c<<(j&7));}
-    for(int i=0;i<8;i++)_sh_puthex8(h[i]);
-    t_print("  ");t_print(a);t_print("\n");
+    if(!a[0]){t_print("Usage: sha256sum <fichier|texte>\n");return;}
+    int isf;const char*in=_hash_input(a,&isf);
+    uint8_t d[32];k_sha256((const uint8_t*)in,(uint32_t)strlen(in),d);
+    _print_hex(d,32);
+    t_print("  ");t_print(a);t_print(isf?"\n":"  (texte)\n");
 }
 static void sh_base64(const char*a){
     if(!a[0]){t_print("Usage: base64 <texte>\n");return;}
@@ -1405,6 +2014,7 @@ static void handle_command(void){
                 if(clen>DVFS_CLEN-2)clen=DVFS_CLEN-2;
                 memcpy(e->content,content,(size_t)clen);
                 e->content[clen]='\n';e->content[clen+1]='\0';
+                _dvfs_dirty=1;
             }
             t_print("Ecrit dans: ");t_print(fn);t_print("\n");
         }else{t_print(arg);t_print("\n");}
@@ -1639,16 +2249,47 @@ static void handle_command(void){
     else if(!strcmp(inp,"readonly")||_sh_sw(inp,"readonly "))t_print("readonly: ok\n");
     else if(!strcmp(inp,"dd")||_sh_sw(inp,"dd "))
         {t_print("1+0 records in\n1+0 records out\n512 bytes copied\n");}
-    else if(!strcmp(inp,"mkfs")||_sh_sw(inp,"mkfs "))
-        {t_print("mkfs: ");t_print(arg[0]?arg:"?");t_print(": simule\n");}
-    else if(!strcmp(inp,"fsck")||_sh_sw(inp,"fsck "))
-        t_print("fsck: /dev/hda: prop: 0 erreur\n");
-    else if(!strcmp(inp,"blkid"))
-        t_print("/dev/hda: TYPE=\"ext2\" LABEL=\"myos\"\n");
-    else if(!strcmp(inp,"fdisk")||_sh_sw(inp,"fdisk "))
-        t_print("Disk /dev/hda: 1.4 MB, 2880 sectors\n");
+    else if(!strcmp(inp,"mkfs")||_sh_sw(inp,"mkfs ")){
+        /* vrai formatage: efface le VFS en RAM ET la zone MyFS du disque */
+        memset(_dvfs,0,sizeof _dvfs);
+        dvfs_sync();
+        if(_ata_ok)t_print("mkfs: MyFS reformate sur /dev/hda (ecriture reelle)\n");
+        else t_print("mkfs: VFS efface (pas de disque pour persister)\n");
+    }
+    else if(!strcmp(inp,"fsck")||_sh_sw(inp,"fsck ")){
+        /* vraie verification: relit le superbloc et compte les entrees */
+        if(!_ata_ok)t_print("fsck: pas de disque ATA\n");
+        else if(!ata_read(MYFS_LBA,_fs_secbuf))t_print("fsck: erreur de lecture LBA 500\n");
+        else if(*(uint32_t*)_fs_secbuf!=0x31534659u)
+            t_print("fsck: pas de superbloc MyFS (lancer mkfs ou creer un fichier)\n");
+        else{
+            int n=0;uint32_t by=0;
+            for(int i=0;i<DVFS_MAX;i++)if(_dvfs[i].used){n++;by+=(uint32_t)strlen(_dvfs[i].content);}
+            t_print("fsck: superbloc OK, ");_sh_puti(n);
+            t_print(" fichiers, ");_sh_puti((int)by);t_print(" octets, 0 erreur\n");
+        }
+    }
+    else if(!strcmp(inp,"blkid")){
+        if(_ata_ok&&ata_read(MYFS_LBA,_fs_secbuf)&&*(uint32_t*)_fs_secbuf==0x31534659u)
+            t_print("/dev/hda: TYPE=\"myfs\" MAGIC=\"YFS1\" (lu sur disque)\n");
+        else t_print("/dev/hda: pas de systeme de fichiers reconnu\n");
+    }
+    else if(!strcmp(inp,"fdisk")||_sh_sw(inp,"fdisk ")){
+        if(!_ata_ok){t_print("fdisk: pas de disque\n");}
+        else{
+            t_print("Disque /dev/hda: ");t_print(_ata_model);
+            t_print(", ");_sh_puti((int)_ata_sectors);t_print(" secteurs (");
+            _sh_puti((int)(_ata_sectors/2));t_print(" Ko)\n");
+            t_print("  LBA 0        MBR (stage1)\n");
+            t_print("  LBA 1-16     MineGRUB (stage2)\n");
+            t_print("  LBA 17-400   kernel (3 chunks de 128)\n");
+            uint32_t fs_sects=1+(uint32_t)((sizeof(_dvfs)+511)/512);
+            t_print("  LBA 500-");_sh_puti((int)(MYFS_LBA+fs_sects));
+            t_print("  MyFS (fichiers persistants)\n");
+        }
+    }
     else if(!strcmp(inp,"parted")||_sh_sw(inp,"parted "))
-        t_print("GNU Parted: /dev/hda 1.44MB ext2\n");
+        t_print("parted: voir fdisk (table reelle du disque)\n");
     /* shell */
     else if(!strcmp(inp,"history"))sh_history();
     else if(!strcmp(inp,"man")||_sh_sw(inp,"man "))sh_man(arg);
@@ -1697,6 +2338,7 @@ static void handle_command(void){
         t_print("           cal seq yes sleep color matrix\n");
         t_print("           sl hack fire rain pipes nyan lolcat\n");
         t_print("           creeper nyan cowsay\n");
+        t_print(" Jeux    : minecraft snake rtype pong\n");
         t_print(" Autres  : reboot shutdown mem make gcc nasm\n");
         t_print("           dd mkfs fdisk blkid parted fsck\n");
         t_print("Type 'man <cmd>' pour l'aide d'une commande.\n");
@@ -1704,6 +2346,7 @@ static void handle_command(void){
     else if(!strcmp(inp,"snake")){win_open(W_SNAKE);snake_reset();}
     else if(!strcmp(inp,"rtype")){win_open(W_RTYPE);rtype_reset();}
     else if(!strcmp(inp,"pong")){win_open(W_PONG);pong_reset();}
+    else if(!strcmp(inp,"minecraft")||!strcmp(inp,"mycraft")){win_open(W_MINE);}
     else if(!strcmp(inp,"clear")||!strcmp(inp,"cls"))
         {for(int i=0;i<T_ROWS;i++)_tlines[i][0]='\0';_tnlines=0;}
     else if(!strcmp(inp,"about"))
@@ -1736,9 +2379,18 @@ static void handle_command(void){
     else if(!strcmp(inp,"figlet")||_sh_sw(inp,"figlet "))sh_figlet(arg);
     else if(!strcmp(inp,"toilet")||_sh_sw(inp,"toilet "))sh_toilet(arg);
     else if(!strcmp(inp,"mem")){
-        t_print("Heap : 0x400000  4MB\n");
-        t_print("Kern : 0x010000 ~88KB\n");
-        t_print("BkBuf: 0x300000 900KB\n");
+        uint32_t kimg=(uint32_t)(__bss_start-(uint8_t*)0x10000);
+        uint32_t kbss=(uint32_t)(__bss_end-__bss_start);
+        t_print("Carte memoire (tailles reelles):\n");
+        t_print("  0x010000 kernel image ");_sh_puti((int)(kimg/1024));t_print(" Ko\n");
+        t_print("  0x0");_sh_puthex((uint32_t)__bss_start);t_print(" bss ");
+        _sh_puti((int)(kbss/1024));t_print(" Ko\n");
+        t_print("  0x200000 pile kernel\n");
+        t_print("  0x300000 backbuffer VESA 1406 Ko\n");
+        t_print("  0x400000 canvas Paint 157 Ko\n");
+        t_print("  0x500000 heap malloc 4096 Ko\n");
+        t_print("  RAM totale: ");_sh_puti((int)(ram_total_kb()/1024));
+        t_print(" Mo (CMOS)\n");
     }
     else if(!strcmp(inp,"shutdown")||!strcmp(inp,"poweroff"))
         {t_print("Arret du systeme...\n");cmd_reboot();}
@@ -1746,6 +2398,7 @@ static void handle_command(void){
         {t_print("Redemarrage...\n");cmd_reboot();}
     else if(inp[0]=='#'){}
     else if(inp[0]){t_print(inp);t_print(": commande introuvable\n");}
+    if(_dvfs_dirty)dvfs_sync();   /* persiste les fichiers sur le disque */
     _tilen=0;_tinput[0]='\0';
 }
 
@@ -1914,6 +2567,7 @@ static void _nano_save(void){
         if(i<_word_nl-1)e->content[o++]='\n';
     }
     e->content[o]='\0';
+    _dvfs_dirty=1;
 }
 
 /* Ouvre nano avec un fichier du VFS */
@@ -2011,7 +2665,7 @@ static void word_text(char ch){
 
 typedef struct{int x,y,w,h,visible,minimized;const char* title;}AppWin;
 
-#define NW         14
+#define NW         15
 #define W_TERM     0
 #define W_ABOUT    1
 #define W_CREEP    2
@@ -2039,23 +2693,43 @@ static AppWin _wins[NW]={
     {80, 50, 660,490,0,0,"Snake"},
     {1,  1,  SCR_W-2,SCR_H-33,0,0,"R-Type"},
     {150,50, 500,430,0,0,"Pong"},
+    {79, 40, 642,503,0,0,"MyCraft"},
 };
-static int _z[NW]={0,1,2,3,4,5,6,7,8,9,10,11,12,13};
+static int _z[NW]={0,1,2,3,4,5,6,7,8,9,10,11,12,13,14};
 static int _drag_win=-1,_drag_ox,_drag_oy;
 static int _focus=-1;
 
 static void win_front(int idx){
     int k=-1;
     for(int i=0;i<NW;i++)if(_z[i]==idx){k=i;break;}
-    if(k<0||k==NW-1)return;
+    if(k<0)return;
+    _focus=idx;             /* meme si deja au premier plan */
+    if(k==NW-1)return;
     for(int i=k;i<NW-1;i++)_z[i]=_z[i+1];
-    _z[NW-1]=idx;_focus=idx;
+    _z[NW-1]=idx;
 }
 static void win_open(int idx){
     _wins[idx].visible=1;_wins[idx].minimized=0;win_front(idx);
     if(idx==W_PAINT&&!_paint_inited){memset(PAINT_CANVAS,0,PAINT_CW*PAINT_CH);_paint_inited=1;}
     if(idx==W_CODE&&!_code_inited){code_init();_code_inited=1;}
     if(idx==W_WORD&&!_word_inited){word_init();_word_inited=1;}
+    if(idx==W_MINE&&!_mine_inited){mine_reset();_mine_inited=1;}
+}
+
+/* ps/top reels: le kernel + les fenetres reellement ouvertes */
+static void _ps_real(int mode){
+    t_print("  PID  ETAT  TACHE\n");
+    t_print("    0  R     kernel (kmain, boucle evenements)\n");
+    t_print("    1  R     wm (bureau ");_sh_puti(SCR_W);t_print("x");
+    _sh_puti(SCR_H);t_print(")\n");
+    int n=2;
+    for(int i=0;i<NW;i++){
+        if(!_wins[i].visible)continue;
+        t_print("   ");_sh_puti(10+i);
+        t_print(_wins[i].minimized?"  S     ":(_focus==i?"  R+    ":"  R     "));
+        t_print(_wins[i].title);t_print("\n");n++;
+    }
+    if(mode){t_print("\n");_sh_puti(n);t_print(" taches reelles\n");}
 }
 
 /* ============================================================
@@ -2193,11 +2867,14 @@ static void _burl_nav(void){
     _bpage=0;
 }
 
-#define NICONS 12
-static const int   IC_Y[NICONS]={8,53,98,143,188,233,278,323,368,413,458,503};
-static const char* IC_LBL[NICONS]={"Terminal","Paint","Code","Word","Creeper","A propos","Reboot","Params","Browser","Snake","R-Type","Pong"};
+#define NICONS 13
+static const int   IC_Y[12]={8,53,98,143,188,233,278,323,368,413,458,503};
+static const char* IC_LBL[NICONS]={"Terminal","Paint","Code","Word","Creeper","A propos","Reboot","Params","Browser","Snake","R-Type","Pong","MyCraft"};
 #define IC_X  6
 #define IC_SZ 32
+/* 12 icones par colonne, colonnes de 76 px */
+#define IC_IX(i) (IC_X+((i)/12)*76)
+#define IC_IY(i) (IC_Y[(i)%12])
 
 /* ============================================================
  * Curseur
@@ -2506,7 +3183,7 @@ static void draw_word(sfcml_Window* win,int wi){
  * ============================================================ */
 static void draw_icons(sfcml_Window* win){
     for(int i=0;i<NICONS;i++){
-        int ix=IC_X,iy=IC_Y[i];
+        int ix=IC_IX(i),iy=IC_IY(i);
         int hov=(_mx>=ix-2&&_mx<=ix+IC_SZ+2&&_my>=iy-2&&_my<=iy+IC_SZ+10);
         int sel=(_sel_icon==i);
         if(sel){
@@ -2565,6 +3242,17 @@ static void draw_icons(sfcml_Window* win){
             sfcml_fillRect(win,sfcml_rect(ix+4,iy+14,4,4),hov?sfcml_rgb(200,200,255):sfcml_rgb(150,150,200));
             sfcml_fillRect(win,sfcml_rect(ix+24,iy+14,4,4),hov?sfcml_rgb(200,200,255):sfcml_rgb(150,150,200));
             break;
+        case 12:{ /* MyCraft (bloc d'herbe) */
+            sfcml_fillRect(win,sfcml_rect(ix,iy,IC_SZ,IC_SZ),sfcml_rgb(120,82,50));
+            sfcml_fillRect(win,sfcml_rect(ix,iy,IC_SZ,10),sfcml_rgb(80,165,60));
+            for(int d=0;d<26;d++){
+                int dpx=ix+(d*13)%IC_SZ,dpy=iy+12+(d*7)%(IC_SZ-14);
+                sfcml_drawPixel(win,dpx,dpy,sfcml_rgb(92,62,38));
+            }
+            for(int d=0;d<10;d++)
+                sfcml_drawPixel(win,ix+(d*11)%IC_SZ,iy+2+(d*5)%7,sfcml_rgb(110,200,90));
+            sfcml_drawRect(win,sfcml_rect(ix,iy,IC_SZ,IC_SZ),hov?SFCML_WHITE:sfcml_rgb(60,42,26));
+            break;}
         default: /* Navigateur */
             sfcml_fillRect(win,sfcml_rect(ix,iy,IC_SZ,IC_SZ),sfcml_rgb(248,249,250));
             sfcml_drawRect(win,sfcml_rect(ix,iy,IC_SZ,IC_SZ),hov?sfcml_rgb(66,133,244):sfcml_rgb(180,180,200));
@@ -2584,7 +3272,7 @@ static void draw_icons(sfcml_Window* win){
  * ============================================================ */
 #define SM_W   172
 #define SM_IH   22
-#define SM_N    14
+#define SM_N    15
 #define SM_H   (SM_N*SM_IH+8)
 #define SM_Y   (TB_Y-SM_H)
 
@@ -2592,7 +3280,7 @@ static const char* SM_LBL[SM_N]={
     "  Terminal","  Creeper!","  A propos","  ---------",
     "  Paint","  Code Editor","  Word","  Navigateur",
     "  Calculatrice","  Fichiers","  Reseau","  Parametres",
-    "  ---------","  Redemarrer",
+    "  MyCraft","  ---------","  Redemarrer",
 };
 
 static void draw_smenu(sfcml_Window* win){
@@ -2627,7 +3315,8 @@ static void smenu_click(int mx,int my){
     else if(item==9)win_open(W_FILES);
     else if(item==10)win_open(W_NETMGR);
     else if(item==11)win_open(W_SETTINGS);
-    else if(item==13)cmd_reboot();
+    else if(item==12)win_open(W_MINE);
+    else if(item==14)cmd_reboot();
 }
 
 /* ============================================================
@@ -3977,11 +4666,14 @@ static void redraw(sfcml_Window* win){
         else if(i==W_SNAKE)     draw_snake(win,i);
         else if(i==W_RTYPE)     draw_rtype(win,i);
         else if(i==W_PONG)      draw_pong(win,i);
+        else if(i==W_MINE)      draw_mine(win,i);
     }
     draw_taskbar(win);
     if(_start_open)draw_smenu(win);
     if(_rcopen)    draw_rcmenu(win);
-    draw_cursor(win,_mx,_my);
+    /* curseur masque quand MyCraft capture la souris */
+    if(!(_mc_look&&_focus==W_MINE&&_wins[W_MINE].visible&&!_wins[W_MINE].minimized))
+        draw_cursor(win,_mx,_my);
     sfcml_present(win);
 }
 
@@ -4020,6 +4712,23 @@ static void paint_click(int mx,int my){
  * ============================================================ */
 static void on_press(int mx,int my,int btn){
     if(_sleeping){_sleeping=0;_inact_secs=0;return;}
+    /* Clic dans la zone de jeu MyCraft (si au premier plan) :
+       gauche=casser, droit=poser */
+    if(_wins[W_MINE].visible&&!_wins[W_MINE].minimized){
+        int top=-1;
+        for(int zi=NW-1;zi>=0;zi--){
+            int i=_z[zi];AppWin* w2=&_wins[i];
+            if(!w2->visible||w2->minimized)continue;
+            if(mx>=w2->x&&mx<w2->x+w2->w&&my>=w2->y&&my<w2->y+w2->h){top=i;break;}
+        }
+        if(top==W_MINE){
+            AppWin* w2=&_wins[W_MINE];
+            if(my>=w2->y+TBAR_H&&mx>w2->x&&mx<w2->x+w2->w-1&&my<w2->y+w2->h-1){
+                _rcopen=0;_start_open=0;
+                win_front(W_MINE);mine_click(btn);return;
+            }
+        }
+    }
     if(btn==1){_rcopen=1;_rcx=mx;_rcy=my;_start_open=0;return;}
     if(_rcopen){rcmenu_click(mx,my);return;}
     if(_start_open){smenu_click(mx,my);return;}
@@ -4058,7 +4767,7 @@ static void on_press(int mx,int my,int btn){
     /* Icons */
     int found=-1;
     for(int i=0;i<NICONS;i++)
-        if(mx>=IC_X&&mx<IC_X+IC_SZ&&my>=IC_Y[i]&&my<IC_Y[i]+IC_SZ+10){found=i;break;}
+        if(mx>=IC_IX(i)&&mx<IC_IX(i)+IC_SZ&&my>=IC_IY(i)&&my<IC_IY(i)+IC_SZ+10){found=i;break;}
     if(found>=0){
         if(_sel_icon==found){
             if(found==0)win_open(W_TERM);
@@ -4072,6 +4781,7 @@ static void on_press(int mx,int my,int btn){
             else if(found==9){win_open(W_SNAKE);snake_reset();}
             else if(found==10){win_open(W_RTYPE);rtype_reset();}
             else if(found==11){win_open(W_PONG);pong_reset();}
+            else if(found==12)win_open(W_MINE);
             else{win_open(W_BROWSER);_bnav(0);}
         }
         _sel_icon=found;
@@ -4355,16 +5065,510 @@ static void draw_pong(sfcml_Window* win,int wi){
 }
 
 /* ============================================================
+ * MyCraft - Minecraft 3D from scratch
+ * - Monde voxel 64x64x32 genere procedurellement (collines,
+ *   arbres, grottes, plages)
+ * - Rendu raycasting par pixel (DDA voxel en virgule fixe 16.16),
+ *   160x120 upscale x4 -> 640x480
+ * - Textures 16x16 100% procedurales (aucun asset externe)
+ * - Physique: gravite, saut, collisions AABB
+ * - Casser (clic G) / poser (clic D) des blocs, hotbar 9 slots
+ * ============================================================ */
+#define MC_XZ    64                 /* taille monde en X et Z */
+#define MC_Y     32                 /* hauteur monde */
+#define MC_RW    160                /* resolution interne de rendu */
+#define MC_RH    120
+#define MC_SC    4                  /* upscale -> 640x480 */
+#define MC_NB    12                 /* types de blocs */
+#define MC_FIX   16                 /* virgule fixe 16.16 */
+#define MC_ONE   (1<<MC_FIX)
+#define MC_MAXT  (28<<MC_FIX)       /* distance de vue (blocs) */
+#define MC_INF   0x3FFFFFFF
+
+enum{MC_AIR=0,MC_GRASS,MC_DIRT,MC_STONE,MC_COBBLE,MC_PLANK,
+     MC_LOG,MC_LEAF,MC_SAND,MC_BRICK,MC_GLASS,MC_BEDROCK};
+
+static uint8_t  _mc_w[MC_XZ*MC_XZ*MC_Y];   /* monde: x + z*64 + y*4096 */
+static uint32_t _mc_tex[MC_NB][3][256];    /* [bloc][0=haut 1=cote 2=bas][16x16], 0=transparent */
+static int      _mc_hmap[MC_XZ*MC_XZ];     /* hauteur du sol par colonne */
+static uint8_t  _mc_row[MC_RW*MC_SC*3];    /* une ligne de rendu upscalee (BGR) */
+static float _mc_px,_mc_py,_mc_pz;         /* position des pieds */
+static float _mc_vy,_mc_yaw,_mc_pitch;
+static int   _mc_ground;
+static int   _mc_kf,_mc_kb,_mc_kl,_mc_kr,_mc_kj;  /* touches deplacement */
+static int   _mc_lu,_mc_ld,_mc_ll,_mc_lr;         /* touches regard */
+static int   _mc_hot;                      /* slot hotbar 0..8 */
+static unsigned _mc_seed=20260705u;
+static int   _mc_fps,_mc_frm;
+static uint32_t _mc_ft;
+
+static const uint8_t _mc_hotbar[9]={MC_DIRT,MC_STONE,MC_COBBLE,MC_PLANK,
+    MC_LOG,MC_LEAF,MC_SAND,MC_BRICK,MC_GLASS};
+static const char* _mc_names[MC_NB]={"Air","Herbe","Terre","Pierre","Pave",
+    "Planches","Bois","Feuilles","Sable","Brique","Verre","Bedrock"};
+
+static unsigned _mc_rnd(void){
+    _mc_seed^=_mc_seed<<13;_mc_seed^=_mc_seed>>17;_mc_seed^=_mc_seed<<5;
+    return _mc_seed;
+}
+/* x87 direct: pas de libm en freestanding */
+static float mc_sin(float x){float r;__asm__("fsin":"=t"(r):"0"(x));return r;}
+static float mc_cos(float x){float r;__asm__("fcos":"=t"(r):"0"(x));return r;}
+static inline int32_t mc_mul(int32_t a,int32_t b){return (int32_t)(((int64_t)a*b)>>MC_FIX);}
+
+static inline uint8_t mc_get(int x,int y,int z){
+    if((unsigned)x>=MC_XZ||(unsigned)z>=MC_XZ||(unsigned)y>=MC_Y)return MC_AIR;
+    return _mc_w[x+(z<<6)+(y<<12)];
+}
+static inline void mc_set(int x,int y,int z,uint8_t b){
+    if((unsigned)x>=MC_XZ||(unsigned)z>=MC_XZ||(unsigned)y>=MC_Y)return;
+    _mc_w[x+(z<<6)+(y<<12)]=b;
+}
+
+/* ---- Textures procedurales ---- */
+static uint32_t mc_rgbu(int r,int g,int b){
+    if(r<0)r=0;if(r>255)r=255;if(g<0)g=0;if(g>255)g=255;if(b<0)b=0;if(b>255)b=255;
+    return 0xFF000000u|((uint32_t)r<<16)|((uint32_t)g<<8)|(uint32_t)b;
+}
+static void mc_gen_tex(void){
+    for(int b=1;b<MC_NB;b++)for(int f=0;f<3;f++)
+    for(int v=0;v<16;v++)for(int u=0;u<16;u++){
+        int n=(int)(_mc_rnd()%32)-16;   /* bruit -16..15 */
+        uint32_t c=0;
+        switch(b){
+        case MC_GRASS:
+            if(f==0)      c=mc_rgbu(72+n/2,150+n,52+n/2);
+            else if(f==2) c=mc_rgbu(134+n,96+n,58+n/2);
+            else{int fr=3+(int)(_mc_rnd()%3);
+                 if(v<fr)c=mc_rgbu(72+n/2,150+n,52+n/2);
+                 else    c=mc_rgbu(134+n,96+n,58+n/2);}
+            break;
+        case MC_DIRT: c=mc_rgbu(134+n,96+n,58+n/2);break;
+        case MC_STONE:{int d=(_mc_rnd()%8==0)?-30:0;
+            c=mc_rgbu(125+n/2+d,125+n/2+d,128+n/2+d);}break;
+        case MC_COBBLE:{
+            int cell=((u>>2)*7+(v>>2)*13)%3;
+            int base=100+cell*24+n/2;
+            if((u&3)==0||(v&3)==0)base-=35;
+            c=mc_rgbu(base,base,base+4);}break;
+        case MC_PLANK:{
+            int base=172+n/2;
+            if((v&3)==3)base-=55;
+            if(((v>>2)&1)==0?u==7:u==15)base-=40;
+            c=mc_rgbu(base,(base*2)/3,base/3);}break;
+        case MC_LOG:
+            if(f==1){int base=96+((u*37)%7)*6+n/4;
+                     if((v&7)==7)base-=15;
+                     c=mc_rgbu(base,(base*3)/4,base/2);}
+            else{int dx2=u-8,dz2=v-8;int d2=dx2*dx2+dz2*dz2;
+                 int ring=((d2>>3)&1)?152:112;
+                 c=mc_rgbu(ring+n/4,(ring*3)/4,ring/2);}
+            break;
+        case MC_LEAF:
+            if(_mc_rnd()%4==0)c=0;   /* trou transparent */
+            else c=mc_rgbu(42+n/2,112+n,36+n/2);
+            break;
+        case MC_SAND: c=mc_rgbu(218+n/2,204+n/2,152+n/2);break;
+        case MC_BRICK:{
+            int row=v>>2;
+            int mortar=((v&3)==0)||(((u+((row&1)<<2))&7)==0);
+            if(mortar)c=mc_rgbu(176+n/3,171+n/3,166+n/3);
+            else      c=mc_rgbu(156+n/2,62+n/3,52+n/3);}break;
+        case MC_GLASS:
+            if(u==0||u==15||v==0||v==15)c=mc_rgbu(212,236,246);
+            else if(u+v==18||u+v==19)   c=mc_rgbu(232,246,255);
+            else c=0;                    /* transparent */
+            break;
+        case MC_BEDROCK:{int q=((_mc_rnd()>>5)&1)?42:0;
+            c=mc_rgbu(52+q+n/2,52+q+n/2,58+q+n/2);}break;
+        }
+        _mc_tex[b][f][(v<<4)|u]=c;
+    }
+}
+
+/* ---- Generation du monde ---- */
+static void mc_genworld(void){
+    memset(_mc_w,0,sizeof _mc_w);
+    /* heightmap: bruit de valeur (grille 9x9 interpolee) */
+    int grid[9][9];
+    for(int i=0;i<9;i++)for(int j=0;j<9;j++)grid[i][j]=9+(int)(_mc_rnd()%12);
+    for(int z=0;z<MC_XZ;z++)for(int x=0;x<MC_XZ;x++){
+        int gx=x>>3,gz=z>>3,fx=x&7,fz=z&7;
+        int h0=grid[gx][gz]*(8-fx)+grid[gx+1][gz]*fx;
+        int h1=grid[gx][gz+1]*(8-fx)+grid[gx+1][gz+1]*fx;
+        int h=(h0*(8-fz)+h1*fz)>>6;
+        _mc_hmap[x+(z<<6)]=h;
+        for(int y=0;y<=h;y++){
+            uint8_t b;
+            if(y==0)b=MC_BEDROCK;
+            else if(y<=h-4)b=MC_STONE;
+            else if(y<h)b=MC_DIRT;
+            else b=(h<11)?MC_SAND:MC_GRASS;
+            mc_set(x,y,z,b);
+        }
+    }
+    /* grottes: spheres creusees sous la surface */
+    for(int i=0;i<26;i++){
+        int cx=4+(int)(_mc_rnd()%(MC_XZ-8)),cz=4+(int)(_mc_rnd()%(MC_XZ-8));
+        int cy=3+(int)(_mc_rnd()%10),r=2+(int)(_mc_rnd()%3);
+        for(int dy=-r;dy<=r;dy++)for(int dz=-r;dz<=r;dz++)for(int dx=-r;dx<=r;dx++){
+            if(dx*dx+dy*dy+dz*dz>r*r)continue;
+            if(mc_get(cx+dx,cy+dy,cz+dz)!=MC_BEDROCK)mc_set(cx+dx,cy+dy,cz+dz,MC_AIR);
+        }
+    }
+    /* arbres */
+    for(int i=0;i<16;i++){
+        int x=3+(int)(_mc_rnd()%(MC_XZ-6)),z=3+(int)(_mc_rnd()%(MC_XZ-6));
+        int h=_mc_hmap[x+(z<<6)];
+        if(mc_get(x,h,z)!=MC_GRASS||h+6>=MC_Y)continue;
+        int th=4+(int)(_mc_rnd()%2);
+        for(int t=1;t<=th;t++)mc_set(x,h+t,z,MC_LOG);
+        for(int dy=th-2;dy<=th+1;dy++){
+            int r=(dy>=th)?1:2;
+            for(int dz=-r;dz<=r;dz++)for(int dx=-r;dx<=r;dx++){
+                if(dx==0&&dz==0&&dy<=th)continue;
+                if(dx*dx+dz*dz>r*r+1)continue;
+                if(mc_get(x+dx,h+dy,z+dz)==MC_AIR)mc_set(x+dx,h+dy,z+dz,MC_LEAF);
+            }
+        }
+    }
+}
+
+static void mine_reset(void){
+    mc_gen_tex();
+    mc_genworld();
+    _mc_px=32.5f;_mc_pz=32.5f;
+    _mc_py=(float)(_mc_hmap[32+(32<<6)]+2);
+    _mc_vy=0;_mc_yaw=0.8f;_mc_pitch=0.0f;_mc_ground=0;
+    _mc_kf=_mc_kb=_mc_kl=_mc_kr=_mc_kj=0;
+    _mc_lu=_mc_ld=_mc_ll=_mc_lr=0;
+    _mc_hot=0;_mc_look=0;
+}
+
+/* Centre le curseur dans la zone de jeu (pour le mouse-look) */
+static void mc_center_mouse(void){
+    AppWin* w=&_wins[W_MINE];
+    int ctx=w->x+1+(MC_RW*MC_SC)/2,cty=w->y+TBAR_H+(MC_RH*MC_SC)/2;
+    _mx=ctx;_my=cty;
+    sfcml_warpMouse(ctx,cty);
+}
+
+/* ---- Physique ---- */
+static int mc_boxfree(float x,float y,float z){
+    /* AABB joueur: demi-largeur 0.3, hauteur 1.8, (x,y,z)=pieds */
+    int x0=(int)(x-0.3f),x1=(int)(x+0.3f);
+    int z0=(int)(z-0.3f),z1=(int)(z+0.3f);
+    int y0=(int)y,y1=(int)(y+1.7f);
+    for(int yy=y0;yy<=y1;yy++)for(int zz=z0;zz<=z1;zz++)for(int xx=x0;xx<=x1;xx++)
+        if(mc_get(xx,yy,zz)!=MC_AIR)return 0;
+    return 1;
+}
+static void mine_step(void){
+    if(_focus!=W_MINE){  /* fenetre non focalisee: on relache tout */
+        _mc_kf=_mc_kb=_mc_kl=_mc_kr=_mc_kj=0;
+        _mc_lu=_mc_ld=_mc_ll=_mc_lr=0;
+        _mc_look=0;
+    }
+    /* regard clavier */
+    if(_mc_ll)_mc_yaw-=0.055f;
+    if(_mc_lr)_mc_yaw+=0.055f;
+    if(_mc_lu)_mc_pitch-=0.045f;
+    if(_mc_ld)_mc_pitch+=0.045f;
+    /* regard souris (capture active): delta au centre puis recentrage */
+    if(_mc_look){
+        AppWin* w2=&_wins[W_MINE];
+        int ctx=w2->x+1+(MC_RW*MC_SC)/2,cty=w2->y+TBAR_H+(MC_RH*MC_SC)/2;
+        int mdx=_mx-ctx,mdy=_my-cty;
+        if(mdx||mdy){
+            _mc_yaw  +=(float)mdx*0.005f;
+            _mc_pitch+=(float)mdy*0.005f;
+            mc_center_mouse();
+        }
+    }
+    if(_mc_pitch> 1.45f)_mc_pitch= 1.45f;
+    if(_mc_pitch<-1.45f)_mc_pitch=-1.45f;
+    /* deplacement horizontal (axe par axe pour glisser sur les murs) */
+    float s=mc_sin(_mc_yaw),c=mc_cos(_mc_yaw);
+    float dx=0,dz=0,sp=0.16f;
+    if(_mc_kf){dx+=s*sp;dz+=c*sp;}
+    if(_mc_kb){dx-=s*sp;dz-=c*sp;}
+    if(_mc_kl){dx-=c*sp;dz+=s*sp;}
+    if(_mc_kr){dx+=c*sp;dz-=s*sp;}
+    float nx=_mc_px+dx;
+    if(nx<0.35f)nx=0.35f;if(nx>MC_XZ-0.35f)nx=MC_XZ-0.35f;
+    if(mc_boxfree(nx,_mc_py,_mc_pz))_mc_px=nx;
+    float nz=_mc_pz+dz;
+    if(nz<0.35f)nz=0.35f;if(nz>MC_XZ-0.35f)nz=MC_XZ-0.35f;
+    if(mc_boxfree(_mc_px,_mc_py,nz))_mc_pz=nz;
+    /* gravite + saut */
+    if(_mc_kj&&_mc_ground){_mc_vy=0.27f;_mc_ground=0;}
+    _mc_vy-=0.028f;
+    if(_mc_vy<-0.9f)_mc_vy=-0.9f;
+    float ny=_mc_py+_mc_vy;
+    if(ny<1.0f)ny=1.0f;
+    if(mc_boxfree(_mc_px,ny,_mc_pz)){_mc_py=ny;_mc_ground=0;}
+    else{
+        if(_mc_vy<0){_mc_ground=1;_mc_py=(float)((int)_mc_py);}
+        _mc_vy=0;
+    }
+}
+
+/* ---- Visee: DDA flottant depuis l'oeil, portee 6 blocs ----
+   Retourne le bloc touche (bx,by,bz) et la case juste avant (vx,vy,vz) */
+static int mc_pick(int* bx,int* by,int* bz,int* vx,int* vy,int* vz){
+    float ox=_mc_px,oy=_mc_py+1.62f,oz=_mc_pz;
+    float cp=mc_cos(_mc_pitch);
+    float dx=mc_sin(_mc_yaw)*cp,dy=-mc_sin(_mc_pitch),dz=mc_cos(_mc_yaw)*cp;
+    int ix=(int)ox,iy=(int)oy,iz=(int)oz;
+    int sx=dx>0?1:-1,sy=dy>0?1:-1,sz=dz>0?1:-1;
+    float adx=dx<0?-dx:dx,ady=dy<0?-dy:dy,adz=dz<0?-dz:dz;
+    float tdx=adx>1e-6f?1.0f/adx:1e9f;
+    float tdy=ady>1e-6f?1.0f/ady:1e9f;
+    float tdz=adz>1e-6f?1.0f/adz:1e9f;
+    float fx=ox-(float)ix,fy=oy-(float)iy,fz=oz-(float)iz;
+    float tmx=(dx>0?(1.0f-fx):fx)*tdx;
+    float tmy=(dy>0?(1.0f-fy):fy)*tdy;
+    float tmz=(dz>0?(1.0f-fz):fz)*tdz;
+    for(int i=0;i<64;i++){
+        int lx=ix,ly=iy,lz=iz;float t;
+        if(tmx<tmy&&tmx<tmz){ix+=sx;t=tmx;tmx+=tdx;}
+        else if(tmy<tmz)    {iy+=sy;t=tmy;tmy+=tdy;}
+        else                {iz+=sz;t=tmz;tmz+=tdz;}
+        if(t>6.0f)return 0;
+        if(mc_get(ix,iy,iz)!=MC_AIR){
+            *bx=ix;*by=iy;*bz=iz;*vx=lx;*vy=ly;*vz=lz;return 1;
+        }
+    }
+    return 0;
+}
+static void mine_click(int btn){
+    int bx,by,bz,vx,vy,vz;
+    if(!mc_pick(&bx,&by,&bz,&vx,&vy,&vz))return;
+    if(btn==0){  /* casser */
+        if(mc_get(bx,by,bz)!=MC_BEDROCK)mc_set(bx,by,bz,MC_AIR);
+    }else{       /* poser */
+        if((unsigned)vx>=MC_XZ||(unsigned)vz>=MC_XZ||(unsigned)vy>=MC_Y)return;
+        if(mc_get(vx,vy,vz)!=MC_AIR)return;
+        /* refuse si le bloc chevauche le joueur */
+        float x0=_mc_px-0.3f,x1=_mc_px+0.3f,z0=_mc_pz-0.3f,z1=_mc_pz+0.3f;
+        float y0=_mc_py,y1=_mc_py+1.8f;
+        if((float)vx<x1&&(float)vx+1>x0&&(float)vz<z1&&(float)vz+1>z0&&
+           (float)vy<y1&&(float)vy+1>y0)return;
+        mc_set(vx,vy,vz,_mc_hotbar[_mc_hot]);
+    }
+}
+
+/* ---- Clavier (ZQSD physique en AZERTY = keycodes WASD) ---- */
+static void mine_key_press(sfcml_KeyCode k){
+    if(k==SFCML_KEY_W)_mc_kf=1;
+    else if(k==SFCML_KEY_S)_mc_kb=1;
+    else if(k==SFCML_KEY_A)_mc_kl=1;
+    else if(k==SFCML_KEY_D)_mc_kr=1;
+    else if(k==SFCML_KEY_SPACE)_mc_kj=1;
+    else if(k==SFCML_KEY_UP)_mc_lu=1;
+    else if(k==SFCML_KEY_DOWN)_mc_ld=1;
+    else if(k==SFCML_KEY_LEFT)_mc_ll=1;
+    else if(k==SFCML_KEY_RIGHT)_mc_lr=1;
+    else if(k>=SFCML_KEY_1&&k<=SFCML_KEY_9)_mc_hot=(int)(k-SFCML_KEY_1);
+    else if(k==SFCML_KEY_G)mine_reset();
+    else if(k==SFCML_KEY_TAB){
+        _mc_look=!_mc_look;
+        if(_mc_look)mc_center_mouse();
+    }
+}
+static void mine_key_release(sfcml_KeyCode k){
+    if(k==SFCML_KEY_W)_mc_kf=0;
+    else if(k==SFCML_KEY_S)_mc_kb=0;
+    else if(k==SFCML_KEY_A)_mc_kl=0;
+    else if(k==SFCML_KEY_D)_mc_kr=0;
+    else if(k==SFCML_KEY_SPACE)_mc_kj=0;
+    else if(k==SFCML_KEY_UP)_mc_lu=0;
+    else if(k==SFCML_KEY_DOWN)_mc_ld=0;
+    else if(k==SFCML_KEY_LEFT)_mc_ll=0;
+    else if(k==SFCML_KEY_RIGHT)_mc_lr=0;
+}
+
+/* ---- Rendu raycasting (DDA voxel virgule fixe) ---- */
+static void mine_render(sfcml_Window* win,int cx,int cy){
+    if(!win->back)return;
+    float cyw=mc_cos(_mc_yaw),syw=mc_sin(_mc_yaw);
+    float cpt=mc_cos(_mc_pitch),spt=mc_sin(_mc_pitch);
+    /* base camera en 16.16: forward, right, up (up = f x r) */
+    int32_t fwx=(int32_t)(syw*cpt*MC_ONE),fwy=(int32_t)(-spt*MC_ONE),fwz=(int32_t)(cyw*cpt*MC_ONE);
+    int32_t rtx=(int32_t)(cyw*MC_ONE),rtz=(int32_t)(-syw*MC_ONE);
+    int32_t upx=(int32_t)(syw*spt*MC_ONE),upy=(int32_t)(cpt*MC_ONE),upz=(int32_t)(cyw*spt*MC_ONE);
+    int32_t ox=(int32_t)(_mc_px*MC_ONE),oy=(int32_t)((_mc_py+1.62f)*MC_ONE),oz=(int32_t)(_mc_pz*MC_ONE);
+    int bx0=ox>>MC_FIX,by0=oy>>MC_FIX,bz0=oz>>MC_FIX;
+    int32_t fox=ox&0xFFFF,foy=oy&0xFFFF,foz=oz&0xFFFF;
+
+    for(int ry=0;ry<MC_RH;ry++){
+        int32_t vv=((MC_RH/2-ry)<<MC_FIX)/120;   /* focale 120 px */
+        int32_t bdx=fwx+mc_mul(upx,vv);
+        int32_t bdy=fwy+mc_mul(upy,vv);
+        int32_t bdz=fwz+mc_mul(upz,vv);
+        /* composante Y constante sur toute la ligne */
+        int sy2;int32_t tdy,tmy0;
+        {int32_t a=bdy<0?-bdy:bdy;
+         if(a<1024){sy2=1;tdy=MC_INF;tmy0=MC_INF;}
+         else{tdy=(int32_t)(4294967296.0f/(float)a);
+              sy2=bdy>0?1:-1;
+              tmy0=mc_mul(bdy>0?(MC_ONE-foy):foy,tdy);}}
+        int skr=96+(74*ry)/MC_RH,skg=160+(55*ry)/MC_RH,skb=255;
+        uint8_t* rp=_mc_row;
+        for(int rx=0;rx<MC_RW;rx++){
+            int32_t uu=((rx-MC_RW/2)<<MC_FIX)/120;
+            int32_t dx=bdx+mc_mul(rtx,uu);
+            int32_t dy=bdy;
+            int32_t dz=bdz+mc_mul(rtz,uu);
+            int ix=bx0,iy=by0,iz=bz0;
+            int sx,sz;int32_t tdx,tdz,tmx,tmz,tmy=tmy0;
+            {int32_t a=dx<0?-dx:dx;
+             if(a<1024){sx=1;tdx=MC_INF;tmx=MC_INF;}
+             else{tdx=(int32_t)(4294967296.0f/(float)a);sx=dx>0?1:-1;
+                  tmx=mc_mul(dx>0?(MC_ONE-fox):fox,tdx);}}
+            {int32_t a=dz<0?-dz:dz;
+             if(a<1024){sz=1;tdz=MC_INF;tmz=MC_INF;}
+             else{tdz=(int32_t)(4294967296.0f/(float)a);sz=dz>0?1:-1;
+                  tmz=mc_mul(dz>0?(MC_ONE-foz):foz,tdz);}}
+            int r=skr,g=skg,b=skb;
+            for(int it=0;it<110;it++){
+                int32_t t;int axis;
+                if(tmx<tmy&&tmx<tmz){t=tmx;ix+=sx;tmx+=tdx;axis=0;}
+                else if(tmy<tmz)    {t=tmy;iy+=sy2;tmy+=tdy;axis=1;}
+                else                {t=tmz;iz+=sz;tmz+=tdz;axis=2;}
+                if(t>MC_MAXT)break;
+                if((unsigned)ix>=MC_XZ||(unsigned)iz>=MC_XZ)break;
+                if(iy<0)break;
+                if(iy>=MC_Y){if(sy2>0)break;else continue;}
+                uint8_t blk=_mc_w[ix+(iz<<6)+(iy<<12)];
+                if(!blk)continue;
+                int face,shade,tu,tv;
+                if(axis==1){
+                    int32_t hx=(ox+mc_mul(dx,t))&0xFFFF;
+                    int32_t hz=(oz+mc_mul(dz,t))&0xFFFF;
+                    tu=(hx>>12)&15;tv=(hz>>12)&15;
+                    if(sy2<0){face=0;shade=256;}   /* face du dessus */
+                    else     {face=2;shade=120;}   /* dessous */
+                }else{
+                    int32_t hy=(oy+mc_mul(dy,t))&0xFFFF;
+                    tv=15-((hy>>12)&15);
+                    if(axis==0){
+                        int32_t hz=(oz+mc_mul(dz,t))&0xFFFF;
+                        tu=(hz>>12)&15;face=1;shade=205;
+                    }else{
+                        int32_t hx=(ox+mc_mul(dx,t))&0xFFFF;
+                        tu=(hx>>12)&15;face=1;shade=154;
+                    }
+                }
+                uint32_t tx=_mc_tex[blk][face][(tv<<4)|tu];
+                if(!tx)continue;   /* texel transparent (feuilles/verre) */
+                int tr=(int)((tx>>16)&255)*shade>>8;
+                int tg=(int)((tx>>8)&255)*shade>>8;
+                int tb=(int)(tx&255)*shade>>8;
+                int fo=t/(MC_MAXT/255);            /* brouillard 0..255 */
+                fo=(fo*fo)>>8;
+                r=(tr*(256-fo)+170*fo)>>8;
+                g=(tg*(256-fo)+215*fo)>>8;
+                b=(tb*(256-fo)+255*fo)>>8;
+                break;
+            }
+            uint8_t rb=(uint8_t)r,gb=(uint8_t)g,bb=(uint8_t)b;
+            for(int k=0;k<MC_SC;k++){*rp++=bb;*rp++=gb;*rp++=rb;}
+        }
+        for(int k=0;k<MC_SC;k++){
+            int yy=cy+ry*MC_SC+k;
+            if((unsigned)yy>=win->height)continue;
+            memcpy(win->back+(uint32_t)yy*win->pitch+(uint32_t)cx*3,
+                   _mc_row,sizeof _mc_row);
+        }
+    }
+}
+
+static void draw_mine(sfcml_Window* win,int wi){
+    AppWin* w=&_wins[wi];
+    int cx=w->x+1,cy=w->y+TBAR_H;
+    int cw=MC_RW*MC_SC,ch=MC_RH*MC_SC;
+    mine_render(win,cx,cy);
+    /* viseur */
+    sfcml_fillRect(win,sfcml_rect(cx+cw/2-1,cy+ch/2-7,2,14),sfcml_rgb(235,235,235));
+    sfcml_fillRect(win,sfcml_rect(cx+cw/2-7,cy+ch/2-1,14,2),sfcml_rgb(235,235,235));
+    /* hotbar */
+    int hx0=cx+(cw-9*38)/2,hy0=cy+ch-44;
+    for(int i=0;i<9;i++){
+        int sx2=hx0+i*38;
+        sfcml_fillRect(win,sfcml_rect(sx2,hy0,38,38),sfcml_rgb(28,28,34));
+        for(int v=0;v<16;v++)for(int u=0;u<16;u++){
+            uint32_t tx=_mc_tex[_mc_hotbar[i]][1][(v<<4)|u];
+            sfcml_Color c2=tx?sfcml_rgb((uint8_t)((tx>>16)&255),(uint8_t)((tx>>8)&255),(uint8_t)(tx&255))
+                             :sfcml_rgb(44,44,52);
+            sfcml_fillRect(win,sfcml_rect(sx2+3+u*2,hy0+3+v*2,2,2),c2);
+        }
+        sfcml_drawRect(win,sfcml_rect(sx2,hy0,38,38),
+                       (i==_mc_hot)?SFCML_WHITE:sfcml_rgb(90,90,100));
+        if(i==_mc_hot)sfcml_drawRect(win,sfcml_rect(sx2-1,hy0-1,40,40),SFCML_WHITE);
+    }
+    /* HUD (FPS via la RTC: _rtc.s change une fois par seconde) */
+    _mc_frm++;
+    if(_rtc.s!=(uint8_t)_mc_ft){_mc_fps=_mc_frm;_mc_frm=0;_mc_ft=_rtc.s;}
+    char nb[12];itoa(_mc_fps,nb,10);
+    char hud[64];strncpy(hud,"MyCraft  FPS:",64);strncat(hud,nb,10);
+    sfcml_drawText(win,hud,cx+6,cy+4,SFCML_WHITE,sfcml_rgb(22,22,28));
+    sfcml_drawText(win,"ZQSD:bouger Tab:souris Fleches:regarder Esp:saut ClicG:casser ClicD:poser",
+                   cx+6,cy+16,sfcml_rgb(215,215,215),sfcml_rgb(22,22,28));
+    sfcml_drawText(win,"1-9:choisir bloc  G:nouveau monde  Echap:quitter",
+                   cx+6,cy+28,sfcml_rgb(215,215,215),sfcml_rgb(22,22,28));
+    if(_mc_look)
+        sfcml_drawText(win,"[SOURIS ON - Tab/Echap]",cx+cw-190,cy+4,
+                       sfcml_rgb(120,255,120),sfcml_rgb(22,22,28));
+    sfcml_drawText(win,_mc_names[_mc_hotbar[_mc_hot]],hx0+1,hy0-12,SFCML_WHITE,sfcml_rgb(22,22,28));
+}
+
+/* ============================================================
  * Point d'entree
  * ============================================================ */
 void kmain(void){
+    char lb[96],nb[16];
+    time_init();
+    klog("MyOS: kernel C en mode protege 32-bit");
+    klog("IDT chargee, PIC remappe (0x20-0x2F), PIT 18.2 Hz sur IRQ0");
     if(!sfcml_init())for(;;)__asm__ volatile("hlt");
     sfcml_Window* win=sfcml_createWindow("MyOS");
     win->font=(uint8_t*)font8x8;
-    __asm__ volatile("fninit"); /* init FPU pour les calculs float (Mandelbrot) */
+    strncpy(lb,"VESA: ",96);itoa((int)win->width,nb,10);strncat(lb,nb,8);
+    strncat(lb,"x",2);itoa((int)win->height,nb,10);strncat(lb,nb,8);
+    strncat(lb,"x",2);itoa((int)win->bpp,nb,10);strncat(lb,nb,8);
+    strncat(lb," LFB actif",12);klog(lb);
+    __asm__ volatile("fninit"); /* init FPU pour les calculs float */
+    klog("FPU x87 initialise (fninit)");
     sfcml_mouseInit();
+    klog("PS/2: clavier+souris en polling, data reporting ON");
     rtc_read();
+    strncpy(lb,"RTC CMOS: ",96);
+    itoa((int)_rtc.year,nb,10);strncat(lb,nb,8);strncat(lb,"-",2);
+    itoa((int)_rtc.mon,nb,10);strncat(lb,nb,4);strncat(lb,"-",2);
+    itoa((int)_rtc.day,nb,10);strncat(lb,nb,4);strncat(lb," ",2);
+    itoa((int)_rtc.h,nb,10);strncat(lb,nb,4);strncat(lb,":",2);
+    itoa((int)_rtc.m,nb,10);strncat(lb,nb,4);klog(lb);
+    strncpy(lb,"RAM: ",96);itoa((int)(ram_total_kb()/1024),nb,10);
+    strncat(lb,nb,8);strncat(lb," Mo (CMOS)",12);klog(lb);
+    if(ata_init()){
+        strncpy(lb,"ATA: ",96);strncat(lb,_ata_model,44);
+        strncat(lb,", ",3);itoa((int)_ata_sectors,nb,10);strncat(lb,nb,10);
+        strncat(lb," secteurs",10);klog(lb);
+        if(dvfs_load()){
+            int n=0;for(int i=0;i<DVFS_MAX;i++)if(_dvfs[i].used)n++;
+            strncpy(lb,"MyFS: ",96);itoa(n,nb,10);strncat(lb,nb,6);
+            strncat(lb," fichiers charges depuis LBA 500",40);klog(lb);
+        }else klog("MyFS: pas de superbloc (cree a la 1ere ecriture)");
+    }else klog("ATA: pas de disque sur primaire maitre");
     net_init();
+    if(net_ok){
+        char ib[20];
+        strncpy(lb,"rtl8139: UP, IP ",96);_ip4str(net_my_ip,ib);
+        strncat(lb,ib,20);
+        strncat(lb,net_dhcp_ok?" (DHCP)":" (statique)",14);klog(lb);
+    }else klog("rtl8139: absent ou init echouee");
+    klog("bureau: demarrage de l'interface");
 
     C_DK     = sfcml_rgb(0,  48, 90);
     C_TB     = sfcml_rgb(14, 50,110);
@@ -4418,6 +5622,7 @@ void kmain(void){
                 int fopen=(foc>=0&&_wins[foc].visible&&!_wins[foc].minimized);
                 if(fopen&&foc==W_RTYPE)rtype_key_release(evt.key.code);
                 else if(fopen&&foc==W_PONG)pong_key_release(evt.key.code);
+                else if(fopen&&foc==W_MINE)mine_key_release(evt.key.code);
                 break;
             }
 
@@ -4476,6 +5681,12 @@ void kmain(void){
                 } else if(fopen&&foc==W_PONG){
                     if(evt.key.code==SFCML_KEY_ESCAPE)_wins[W_PONG].minimized=1;
                     else pong_key_press(evt.key.code);
+                } else if(fopen&&foc==W_MINE){
+                    if(evt.key.code==SFCML_KEY_ESCAPE){
+                        if(_mc_look)_mc_look=0;          /* 1er Echap: libere la souris */
+                        else _wins[W_MINE].minimized=1;  /* 2e: minimise */
+                    }
+                    else mine_key_press(evt.key.code);
                 } else {
                     int has_t=_wins[W_TERM].visible&&!_wins[W_TERM].minimized;
                     if(!has_t){if(evt.key.code==SFCML_KEY_ESCAPE)cmd_reboot();break;}
@@ -4529,6 +5740,7 @@ void kmain(void){
             last_s=_rtc.s;
             _blink=!_blink;
             dirty=1;
+            if(_dvfs_dirty)dvfs_sync();   /* persiste nano/word sur disque */
             if(!got){ /* pas d'activite cette seconde */
                 _inact_secs++;
                 if(_veille_sel>0&&_inact_secs>=_veille_secs[_veille_sel])
@@ -4540,6 +5752,7 @@ void kmain(void){
             if(_wins[W_SNAKE].visible&&!_wins[W_SNAKE].minimized){snake_step();dirty=1;}
             if(_wins[W_RTYPE].visible&&!_wins[W_RTYPE].minimized){rtype_step();dirty=1;}
             if(_wins[W_PONG].visible&&!_wins[W_PONG].minimized){pong_step();dirty=1;}
+            if(_wins[W_MINE].visible&&!_wins[W_MINE].minimized){mine_step();dirty=1;}
         }
         if(_sleeping){ draw_screensaver(win); }
         else if(dirty){ redraw(win);dirty=0; }

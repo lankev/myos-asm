@@ -151,6 +151,7 @@ void sfcml_mouseInit(void);
 int  sfcml_getMouseX(void);
 int  sfcml_getMouseY(void);
 int  sfcml_getMouseButton(int btn);
+void sfcml_warpMouse(int x, int y);   /* replace le curseur (mouse-look) */
 
 /* ============================================================
  * Dessin 2D
