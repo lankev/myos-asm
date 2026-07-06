@@ -19,7 +19,7 @@ AR   = ar
 
 LIBC_SRC = libc/src/string.c libc/src/stdlib.c libc/src/stdio.c
 SFCML_SRC = sfcml/src/window.c sfcml/src/graphics.c sfcml/src/events.c
-NET_SRC  = net/net.c
+NET_SRC  = net/net.c net/tls.c
 
 LIBC_OBJ  = $(patsubst %.c, $(BUILD)/%.o, $(LIBC_SRC))
 SFCML_OBJ = $(patsubst %.c, $(BUILD)/%.o, $(SFCML_SRC))
@@ -100,10 +100,16 @@ $(BUILD)/kernel.bin: $(BUILD)/kernel.elf
 	objcopy -O binary $< $@
 	@echo "[KERN] $@"
 
+# Audio : le PC speaker (PIT canal 2) route vers l'hote pour un son reel.
+# SDL marche sur Linux/WSLg et Windows ; ajuste AUDIODRV si besoin (dsound, pa, coreaudio).
+AUDIODRV ?= sdl
+AUDIOFLAGS = -audiodev $(AUDIODRV),id=snd0 -machine pcspk-audiodev=snd0
+
 QFLAGS = -drive file=$(BUILD)/myos.img,format=raw,if=ide \
          -boot c -no-reboot -no-shutdown \
          -vga std -m 128M \
          -display gtk,zoom-to-fit=on \
+         $(AUDIOFLAGS) \
          -netdev user,id=net0 -device rtl8139,netdev=net0
 
 QFLAGS_ASM = -drive file=$(BUILD)/myos_asm.img,format=raw,if=ide \

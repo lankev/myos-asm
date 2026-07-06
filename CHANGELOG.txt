@@ -169,10 +169,60 @@ l'annonce honnetement.
 
 
 ================================================================================
+ [4] SON REEL, SAUVEGARDE MYCRAFT, COMMANDES DISQUE, DEUX JEUX
+================================================================================
+
+--- SON REEL (PC speaker, from scratch) ----------------------------------------
+  - Driver haut-parleur PC : PIT canal 2 (port 0x42) + port 0x61, cable au
+    haut-parleur physique. Le canal 0 reste dedie au temps (IRQ0).
+  - Timing fin : lecture du compteur du canal 0 (resolution ~0.84 us) pour
+    des durees de notes precises, la ou les ticks (55 ms) seraient trop gros.
+  - beep(freq, ms) + play_melody(notes) : notes musicales reelles.
+  - Jingle de demarrage joue au boot ; sons de casse/pose dans MyCraft ;
+    jingles victoire/defaite dans les jeux.
+  - Commandes shell reelles : "beep [Hz] [ms]" et "play".
+  - Makefile : ajout de -audiodev sdl + -machine pcspk-audiodev pour un son
+    audible sur la machine hote (variable AUDIODRV ajustable).
+
+--- SAUVEGARDE DU MONDE MYCRAFT (persistance disque) ---------------------------
+  - Le monde voxel (64x64x32 = 131072 o = 256 secteurs) est ecrit sur une
+    zone ATA dediee (superbloc LBA 599, monde LBA 600-855), avec la position
+    et l'orientation du joueur.
+  - Touche F2 : sauver ("Monde sauvegarde"). Touche F3 : recharger.
+  - A l'ouverture de MyCraft : chargement automatique s'il existe une
+    sauvegarde, sinon generation d'un monde neuf.
+  - Verifie sous QEMU : casser des blocs, F2, casser d'autres, F3 -> l'etat
+    sauve est bien restaure.
+
+--- COMMANDES DISQUE / RESEAU REELLES ------------------------------------------
+  - hexdump lba <N> : lit un vrai secteur via ATA et l'affiche en hexa+ASCII
+    (verifie : LBA 0 montre le vrai code MBR et la signature).
+  - dd <src_lba> <dst_lba> : copie reelle d'un secteur (refuse d'ecraser le
+    kernel/FS en dessous du LBA MyFS).
+  - fdisk : lit le vrai MBR (secteur 0), affiche la signature 0x1FE
+    (0xAA55 verifiee reelle) et parse la table de partitions a l'offset 0x1BE.
+  - wget <url> <fichier> : telecharge via la pile HTTP reelle et enregistre
+    le corps dans un fichier MyFS persistant ; curl affiche un apercu.
+
+--- DEUX NOUVEAUX JEUX (from scratch) ------------------------------------------
+  - TETRIS (clavier) : grille 10x20, 7 tetrominos + rotations, gravite,
+    effacement de lignes, score, acceleration, GAME OVER + rejouer.
+    Fleches: bouger, Haut: tourner, Espace: chute. Son a l'effacement.
+  - DEMINEUR (souris) : grille 12x12, 22 mines, clic gauche = reveler
+    (flood-fill sur les cases vides), clic droit = drapeau, chiffres
+    colores, detection victoire/defaite, sons. Reutilise l'interception
+    de clic dans la zone de jeu (comme MyCraft).
+  - Integres au bureau comme les autres : icones dediees (2e colonne),
+    entrees du menu Demarrer, commandes terminal (tetris / demineur / mines),
+    boucle d'evenements et rendu.
+
+================================================================================
  RECAPITULATIF DES FICHIERS MODIFIES
 ================================================================================
   kernel/kmain.c          jeu MyCraft, mouse-look, IDT/PIC/PIT, ATA, MyFS,
-                          CPUID/PCI/SMBIOS/ACPI, MD5/SHA-256, ps/top/free reels
+                          CPUID/PCI/SMBIOS/ACPI, MD5/SHA-256, ps/top/free reels,
+                          PC speaker + sons, sauvegarde monde MyCraft,
+                          hexdump/dd/fdisk/wget reels, jeux Tetris + Demineur
   kernel/crt0.asm         ISR IRQ0 (irq0_stub) + ISR par defaut (irq_ignore_stub)
   sfcml/src/events.c      fix release des touches etendues, sfcml_warpMouse
   sfcml/include/sfcml.h   declaration sfcml_warpMouse
@@ -180,12 +230,15 @@ l'annonce honnetement.
   net/net.h               declarations reseau
   libc/src/stdlib.c       malloc_stats, heap deplace a 0x500000
   libc/include/stdlib.h   declaration malloc_stats
+  Makefile                flags audio (-audiodev/pcspk) pour le son reel
 
 ================================================================================
  ETAT
 ================================================================================
-  Compile sans erreur. Kernel ~164 Ko (budget 192 Ko, marge ~28 Ko).
-  MyCraft : 29 FPS, aucune regression apres les changements bas niveau.
+  Compile sans erreur. Kernel ~174 Ko (budget 192 Ko, marge ~18 Ko).
+  Tetris et Demineur : jouables et integres, verifies sous QEMU.
+  Son (PC speaker) : timing PIT verifie ; jingle boot + sons jeux/MyCraft.
+  Sauvegarde monde MyCraft (F2/F3), hexdump/fdisk (secteurs reels) : verifies.
   Persistance disque, reseau, crypto, materiel : verifies sous QEMU.
   Aucun commit git effectue (working tree uniquement).
 ================================================================================

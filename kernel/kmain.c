@@ -26,8 +26,20 @@ static void draw_rtype(sfcml_Window* win, int wi);
 static void pong_reset(void);
 static void draw_pong(sfcml_Window* win, int wi);
 #define W_MINE     14
+#define W_TETRIS   15
+#define W_DEMINE   16
 static int  _mine_inited;
+static int  _tet_inited,_ms_inited;
 static int  _mc_look;   /* capture souris (mouse-look), bascule avec Tab */
+static void mine_open_init(void);
+static void mc_save(void);
+static void tet_reset(void);
+static void tet_step(void);
+static void tet_key(sfcml_KeyCode k);
+static void draw_tetris(sfcml_Window* win, int wi);
+static void ms_reset(void);
+static void mines_click(int mx, int my, int btn);
+static void draw_mines(sfcml_Window* win, int wi);
 static void mine_reset(void);
 static void mine_step(void);
 static void mine_click(int btn);
@@ -129,6 +141,51 @@ static uint32_t k_pci_rd(uint8_t bus,uint8_t dev,uint8_t fn,uint8_t reg){
 /* Compteurs d'E/S disque reels (pour iostat/vmstat) */
 static uint32_t _ata_rd_cnt=0,_ata_wr_cnt=0;
 static int _dvfs_dirty=0;
+
+/* ============================================================
+ * Son : PC speaker reel (PIT canal 2 + port 0x61) - from scratch
+ * Le canal 0 du PIT sert deja au temps (IRQ0) ; le canal 2 est
+ * cable au haut-parleur. Timing fin en lisant le compteur du
+ * canal 0 (resolution ~0.84 us) plutot que les ticks (55 ms).
+ * ============================================================ */
+static void speaker_on(uint32_t freq){
+    if(freq<20||freq>20000)return;
+    uint32_t div=1193182u/freq;
+    k_outb(0x43,0xB6);                       /* canal 2, mode 3, LSB+MSB */
+    k_outb(0x42,(uint8_t)(div&0xFF));
+    k_outb(0x42,(uint8_t)((div>>8)&0xFF));
+    k_outb(0x61,(uint8_t)(k_inb(0x61)|3));   /* connecte le haut-parleur */
+}
+static void speaker_off(void){
+    k_outb(0x61,(uint8_t)(k_inb(0x61)&0xFC));
+}
+/* Horloge fine en unites de 1/1193182 s (~0.84 us) */
+static uint32_t pit_fine(void){
+    k_outb(0x43,0x00);                       /* latch canal 0 */
+    uint8_t lo=k_inb(0x40),hi=k_inb(0x40);
+    uint16_t cnt=(uint16_t)(((uint16_t)hi<<8)|lo);
+    return BIOS_TICKS*65536u+(65536u-cnt);   /* monotone croissant */
+}
+static void pit_wait_ms(uint32_t ms){
+    uint32_t start=pit_fine(),units=ms*1193u;
+    while(pit_fine()-start<units)__asm__ volatile("pause");
+}
+/* Une note: frequence Hz pendant ms (freq 0 = silence) */
+static void beep(uint32_t freq,uint32_t ms){
+    if(freq)speaker_on(freq);else speaker_off();
+    pit_wait_ms(ms);
+    speaker_off();
+}
+/* Notes musicales (Hz) */
+enum{N_C4=262,N_D4=294,N_E4=330,N_F4=349,N_G4=392,N_A4=440,N_B4=494,
+     N_C5=523,N_D5=587,N_E5=659,N_G5=784,N_C6=1047};
+typedef struct{uint16_t f,ms;}MNote;
+static void play_melody(const MNote* m,int n){
+    for(int i=0;i<n;i++){beep(m[i].f,m[i].ms);pit_wait_ms(6);}
+}
+static const MNote MEL_BOOT[]={{N_C5,90},{N_E5,90},{N_G5,90},{N_C6,150}};
+static const MNote MEL_WIN[] ={{N_C5,80},{N_E5,80},{N_G5,80},{N_C6,80},{N_G5,80},{N_C6,200}};
+static const MNote MEL_LOSE[]={{N_E4,140},{N_D4,140},{N_C4,260}};
 
 /* ============================================================
  * RTC (Real Time Clock) via CMOS
@@ -1454,11 +1511,10 @@ static void sh_dirname_cmd(const char*a){
     if(l>1&&buf[l-1]=='/')buf[--l]='\0';
     t_print(l>0?buf:"/");t_print("\n");
 }
-static void sh_xxd(const char*a){
-    const char*name=a[0]?a:"kernel";
-    unsigned char*ptr=(unsigned char*)0x10000;
-    for(int row=0;row<8;row++){
-        _sh_puthex((unsigned)(row*16));t_print(": ");
+static uint8_t _dump_buf[512];
+static void _hexdump16(const unsigned char*ptr,int rows,unsigned base){
+    for(int row=0;row<rows;row++){
+        _sh_puthex(base+(unsigned)(row*16));t_print(": ");
         for(int c=0;c<16;c++){_sh_puthex8(ptr[row*16+c]);t_print(c==7?" ":"");}
         t_print("  |");
         for(int c=0;c<16;c++){
@@ -1467,7 +1523,22 @@ static void sh_xxd(const char*a){
         }
         t_print("|\n");
     }
-    t_print("(");t_print(name);t_print(": affichage partiel)\n");
+}
+/* hexdump : "hexdump lba N" lit un vrai secteur disque via ATA,
+   "hexdump N" idem, sinon dump memoire a 0x10000 (kernel). */
+static void sh_xxd(const char*a){
+    const char* p=a;
+    if(!strncmp(p,"lba ",4))p+=4;
+    if(p[0]>='0'&&p[0]<='9'){
+        uint32_t lba=(uint32_t)atoi(p);
+        if(!_ata_ok){t_print("hexdump: pas de disque ATA\n");return;}
+        if(!ata_read(lba,_dump_buf)){t_print("hexdump: erreur lecture LBA\n");return;}
+        t_print("Secteur LBA ");_sh_puti((int)lba);t_print(" (lu du disque reel):\n");
+        _hexdump16(_dump_buf,32,0);   /* 32*16 = 512 octets */
+        return;
+    }
+    _hexdump16((unsigned char*)0x10000,8,0);
+    t_print("(kernel @0x10000, affichage partiel)\n");
 }
 static void sh_od(const char*a){
     (void)a;
@@ -1958,6 +2029,7 @@ static void sh_figlet(const char*a){
 /* ============================================================
  * Shell - handle_command
  * ============================================================ */
+static char _wget_buf[2048];   /* buffer de telechargement wget/curl */
 static void handle_command(void){
     t_hist_add();
     t_print("$ ");t_print(_tinput);t_print("\n");
@@ -2171,8 +2243,69 @@ static void handle_command(void){
     else if(!strcmp(inp,"dig")||_sh_sw(inp,"dig "))sh_nslookup(arg);
     else if(!strcmp(inp,"traceroute")||_sh_sw(inp,"traceroute "))sh_traceroute(arg);
     else if(!strcmp(inp,"curl")||_sh_sw(inp,"curl ")||
-            !strcmp(inp,"wget")||_sh_sw(inp,"wget "))
-        t_print("(reseau HTTP non supporte ici)\n");
+            !strcmp(inp,"wget")||_sh_sw(inp,"wget ")){
+        int is_wget=(inp[0]=='w');
+        if(!net_ok)t_print("reseau indisponible\n");
+        else if(!arg[0])t_print("Usage: wget/curl <url> [fichier]\n");
+        else{
+            char url[64];int ul=0;
+            const char*p=arg;while(*p&&*p!=' '&&ul<63)url[ul++]=*p++;
+            url[ul]='\0';
+            const char*fn=(*p==' ')?p+1:0;
+            int is_https=(url[0]=='h'&&url[1]=='t'&&url[2]=='t'&&url[3]=='p'&&url[4]=='s');
+            t_print(is_https?"Telechargement (TLS): ":"Telechargement: ");t_print(url);t_print("\n");
+            int n=is_https?net_https_get(url,_wget_buf,(int)sizeof(_wget_buf)-1)
+                          :net_http_get (url,_wget_buf,(int)sizeof(_wget_buf)-1);
+            if(n<0){t_print("wget: echec (code ");_sh_puti(n);t_print(", DNS/TCP/TLS)\n");}
+            else{
+                _wget_buf[n]='\0';
+                t_print("Recu: ");_sh_puti(n);t_print(" octets\n");
+                if(is_wget&&fn){   /* sauve le corps dans un fichier MyFS persistant */
+                    char fp[DVFS_PLEN];_dvfs_fullpath(fn,fp,DVFS_PLEN);
+                    DVFSEntry*e=_dvfs_create(fp,0);
+                    if(e){int cl=n;if(cl>DVFS_CLEN-1)cl=DVFS_CLEN-1;
+                        memcpy(e->content,_wget_buf,(size_t)cl);e->content[cl]='\0';
+                        _dvfs_dirty=1;
+                        t_print("Enregistre dans ");t_print(fn);
+                        if(n>DVFS_CLEN-1){t_print(" (tronque a ");_sh_puti(DVFS_CLEN-1);t_print(" o)");}
+                        t_print("\n");}
+                }else{
+                    int show=n>400?400:n;   /* apercu comme curl */
+                    char sav=_wget_buf[show];_wget_buf[show]='\0';
+                    t_print(_wget_buf);_wget_buf[show]=sav;
+                    if(n>show)t_print("\n...(tronque)\n");else t_print("\n");
+                }
+            }
+        }
+    }
+    else if(!strcmp(inp,"https")||_sh_sw(inp,"https ")){
+        /* GET HTTPS via le client TLS 1.2 from scratch */
+        if(!net_ok)t_print("reseau indisponible\n");
+        else if(!arg[0])t_print("Usage: https <hote>[/chemin]  (ex: https example.com)\n");
+        else{
+            char url[80];int ul=0;const char*ap=arg;
+            /* prefixe https:// si absent */
+            if(!(arg[0]=='h'&&arg[1]=='t'&&arg[2]=='t'&&arg[3]=='p')){
+                const char*pre="https://";while(*pre)url[ul++]=*pre++;
+            }
+            while(*ap&&*ap!=' '&&ul<79)url[ul++]=*ap++;url[ul]='\0';
+            t_print("Connexion TLS 1.2 a ");t_print(url);t_print(" ...\n");
+            int n=net_https_get(url,_wget_buf,(int)sizeof(_wget_buf)-1);
+            if(n<0){
+                extern int tls_stage;
+                t_print("https: echec code ");_sh_puti(n);
+                t_print(n==-2?" (DNS)":n==-3?" (TCP:443)":" (handshake TLS)");
+                t_print("  etape=");_sh_puti(tls_stage);t_print("\n");
+                t_print("(0=envoi CH 1=CH ok 2=SH 3=cert 4=SHD 5=CKE 6=fin.cli 7=fin.srv)\n");
+            }else{
+                _wget_buf[n]='\0';
+                t_print("TLS OK - ");_sh_puti(n);t_print(" octets dechiffres:\n");
+                int show=n>1200?1200:n;char sav=_wget_buf[show];_wget_buf[show]='\0';
+                t_print(_wget_buf);_wget_buf[show]=sav;
+                if(n>show)t_print("\n...(tronque)\n");else t_print("\n");
+            }
+        }
+    }
     else if(!strcmp(inp,"ssh")||_sh_sw(inp,"ssh "))t_print("ssh: non supporte\n");
     else if(!strcmp(inp,"ftp")||_sh_sw(inp,"ftp "))t_print("ftp: non supporte\n");
     else if(!strcmp(inp,"host")||_sh_sw(inp,"host "))sh_host(arg);
@@ -2247,8 +2380,24 @@ static void handle_command(void){
     else if(!strcmp(inp,"declare")||_sh_sw(inp,"declare "))t_print("declare: ok\n");
     else if(!strcmp(inp,"set")||_sh_sw(inp,"set "))sh_env();
     else if(!strcmp(inp,"readonly")||_sh_sw(inp,"readonly "))t_print("readonly: ok\n");
-    else if(!strcmp(inp,"dd")||_sh_sw(inp,"dd "))
-        {t_print("1+0 records in\n1+0 records out\n512 bytes copied\n");}
+    else if(!strcmp(inp,"dd")||_sh_sw(inp,"dd ")){
+        /* dd reel : copie un secteur src->dst via ATA. Syntaxe: dd <src_lba> <dst_lba> */
+        if(!_ata_ok)t_print("dd: pas de disque ATA\n");
+        else if(!arg[0])t_print("Usage: dd <src_lba> <dst_lba>  (copie 1 secteur reel)\n");
+        else{
+            int src=atoi(arg);const char*sp=strchr(arg,' ');
+            if(!sp)t_print("Usage: dd <src_lba> <dst_lba>\n");
+            else{
+                int dst=atoi(sp+1);
+                if(dst<MYFS_LBA){t_print("dd: refuse (dst<");_sh_puti(MYFS_LBA);
+                    t_print(" ecraserait kernel/FS)\n");}
+                else if(ata_read((uint32_t)src,_dump_buf)&&ata_write((uint32_t)dst,_dump_buf))
+                    {t_print("1+0 secteur lu, 1+0 ecrit (512 octets, LBA ");
+                     _sh_puti(src);t_print("->");_sh_puti(dst);t_print(", reel)\n");}
+                else t_print("dd: erreur d'E/S ATA\n");
+            }
+        }
+    }
     else if(!strcmp(inp,"mkfs")||_sh_sw(inp,"mkfs ")){
         /* vrai formatage: efface le VFS en RAM ET la zone MyFS du disque */
         memset(_dvfs,0,sizeof _dvfs);
@@ -2276,16 +2425,32 @@ static void handle_command(void){
     }
     else if(!strcmp(inp,"fdisk")||_sh_sw(inp,"fdisk ")){
         if(!_ata_ok){t_print("fdisk: pas de disque\n");}
+        else if(!ata_read(0,_dump_buf)){t_print("fdisk: erreur lecture MBR\n");}
         else{
             t_print("Disque /dev/hda: ");t_print(_ata_model);
             t_print(", ");_sh_puti((int)_ata_sectors);t_print(" secteurs (");
             _sh_puti((int)(_ata_sectors/2));t_print(" Ko)\n");
-            t_print("  LBA 0        MBR (stage1)\n");
-            t_print("  LBA 1-16     MineGRUB (stage2)\n");
-            t_print("  LBA 17-400   kernel (3 chunks de 128)\n");
-            uint32_t fs_sects=1+(uint32_t)((sizeof(_dvfs)+511)/512);
-            t_print("  LBA 500-");_sh_puti((int)(MYFS_LBA+fs_sects));
-            t_print("  MyFS (fichiers persistants)\n");
+            /* Signature MBR reelle a l'offset 510 */
+            uint16_t sig=(uint16_t)(_dump_buf[510]|(_dump_buf[511]<<8));
+            t_print("Signature MBR (0x1FE): 0x");_sh_puthex(sig);
+            t_print(sig==0xAA55?" (valide)\n":" (non standard)\n");
+            /* Table de partitions reelle a l'offset 0x1BE (4 x 16 octets) */
+            t_print("Boot Debut(LBA)  Taille    Type\n");
+            int any=0;
+            for(int i=0;i<4;i++){
+                uint8_t* e=_dump_buf + 0x1BE + i*16;
+                uint8_t type=e[4];
+                uint32_t start=(uint32_t)(e[8]|(e[9]<<8)|(e[10]<<16)|((uint32_t)e[11]<<24));
+                uint32_t size =(uint32_t)(e[12]|(e[13]<<8)|(e[14]<<16)|((uint32_t)e[15]<<24));
+                if(type==0)continue;
+                any=1;
+                t_print(e[0]==0x80?" *   ":"     ");
+                _sh_puti((int)start);t_print("        ");
+                _sh_puti((int)size);t_print("     0x");_sh_puthex8(type);t_print("\n");
+            }
+            if(!any)t_print(" (aucune partition MBR: MyOS boote en secteur brut)\n");
+            t_print("Layout logique MyOS:\n");
+            t_print("  LBA 0 MBR | 1-16 MineGRUB | 17-400 kernel | 500+ MyFS | 599+ monde MyCraft\n");
         }
     }
     else if(!strcmp(inp,"parted")||_sh_sw(inp,"parted "))
@@ -2319,6 +2484,7 @@ static void handle_command(void){
         t_print("           arp iptables nslookup dig host\n");
         t_print("           traceroute whois nc tcpdump\n");
         t_print("           ethtool iwconfig curl wget ssh ftp\n");
+        t_print(" Web     : https <hote>  wget/curl <url>  (TLS 1.2 from scratch)\n");
         t_print(" Crypto  : md5sum sha256sum base64 openssl\n");
         t_print("           gpg ssh-keygen checksec\n");
         t_print(" Binaire : objdump nm readelf strings size\n");
@@ -2334,11 +2500,12 @@ static void handle_command(void){
         t_print(" Shell   : history clear cls about sudo su\n");
         t_print("           crontab at batch watch wall write\n");
         t_print("           script ulimit trap test jobs\n");
+        t_print(" Son     : beep [Hz] [ms]  play\n");
         t_print(" Fun     : fortune cowsay banner figlet toilet\n");
         t_print("           cal seq yes sleep color matrix\n");
         t_print("           sl hack fire rain pipes nyan lolcat\n");
         t_print("           creeper nyan cowsay\n");
-        t_print(" Jeux    : minecraft snake rtype pong\n");
+        t_print(" Jeux    : minecraft tetris demineur snake rtype pong\n");
         t_print(" Autres  : reboot shutdown mem make gcc nasm\n");
         t_print("           dd mkfs fdisk blkid parted fsck\n");
         t_print("Type 'man <cmd>' pour l'aide d'une commande.\n");
@@ -2347,6 +2514,8 @@ static void handle_command(void){
     else if(!strcmp(inp,"rtype")){win_open(W_RTYPE);rtype_reset();}
     else if(!strcmp(inp,"pong")){win_open(W_PONG);pong_reset();}
     else if(!strcmp(inp,"minecraft")||!strcmp(inp,"mycraft")){win_open(W_MINE);}
+    else if(!strcmp(inp,"tetris")){win_open(W_TETRIS);tet_reset();}
+    else if(!strcmp(inp,"demineur")||!strcmp(inp,"mines")||!strcmp(inp,"minesweeper")){win_open(W_DEMINE);ms_reset();}
     else if(!strcmp(inp,"clear")||!strcmp(inp,"cls"))
         {for(int i=0;i<T_ROWS;i++)_tlines[i][0]='\0';_tnlines=0;}
     else if(!strcmp(inp,"about"))
@@ -2369,6 +2538,20 @@ static void handle_command(void){
     else if(!strcmp(inp,"matrix")||!strcmp(inp,"cmatrix"))
         t_print("Wake up, Neo...\nThe Matrix has you.\nFollow the white rabbit.\n");
     else if(!strcmp(inp,"creeper"))t_print("Creeper, Aw Man...\n");
+    else if(!strcmp(inp,"beep")||_sh_sw(inp,"beep ")){
+        /* son reel via le haut-parleur PC */
+        if(!arg[0]){play_melody(MEL_BOOT,4);t_print("beep: jingle joue\n");}
+        else{
+            int f=atoi(arg),ms=200;
+            const char*sp=strchr(arg,' ');
+            if(sp)ms=atoi(sp+1);
+            if(f<20||f>20000){t_print("beep: frequence 20-20000 Hz\n");}
+            else{if(ms<10)ms=10;if(ms>3000)ms=3000;
+                beep((uint32_t)f,(uint32_t)ms);
+                t_print("beep: ");_sh_puti(f);t_print(" Hz ");_sh_puti(ms);t_print(" ms\n");}
+        }
+    }
+    else if(!strcmp(inp,"play")){play_melody(MEL_WIN,6);t_print("play: melodie jouee\n");}
     else if(!strcmp(inp,"sl"))t_print("   o O O     \n   |___|     \n   |---|     \n");
     else if(!strcmp(inp,"hack"))sh_hack();
     else if(!strcmp(inp,"fire"))sh_fire();
@@ -2665,7 +2848,7 @@ static void word_text(char ch){
 
 typedef struct{int x,y,w,h,visible,minimized;const char* title;}AppWin;
 
-#define NW         15
+#define NW         17
 #define W_TERM     0
 #define W_ABOUT    1
 #define W_CREEP    2
@@ -2694,8 +2877,10 @@ static AppWin _wins[NW]={
     {1,  1,  SCR_W-2,SCR_H-33,0,0,"R-Type"},
     {150,50, 500,430,0,0,"Pong"},
     {79, 40, 642,503,0,0,"MyCraft"},
+    {120,40, 360,432,0,0,"Tetris"},
+    {150,50, 340,404,0,0,"Demineur"},
 };
-static int _z[NW]={0,1,2,3,4,5,6,7,8,9,10,11,12,13,14};
+static int _z[NW]={0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16};
 static int _drag_win=-1,_drag_ox,_drag_oy;
 static int _focus=-1;
 
@@ -2713,7 +2898,9 @@ static void win_open(int idx){
     if(idx==W_PAINT&&!_paint_inited){memset(PAINT_CANVAS,0,PAINT_CW*PAINT_CH);_paint_inited=1;}
     if(idx==W_CODE&&!_code_inited){code_init();_code_inited=1;}
     if(idx==W_WORD&&!_word_inited){word_init();_word_inited=1;}
-    if(idx==W_MINE&&!_mine_inited){mine_reset();_mine_inited=1;}
+    if(idx==W_MINE&&!_mine_inited){mine_open_init();_mine_inited=1;}
+    if(idx==W_TETRIS&&!_tet_inited){tet_reset();_tet_inited=1;}
+    if(idx==W_DEMINE&&!_ms_inited){ms_reset();_ms_inited=1;}
 }
 
 /* ps/top reels: le kernel + les fenetres reellement ouvertes */
@@ -2867,9 +3054,9 @@ static void _burl_nav(void){
     _bpage=0;
 }
 
-#define NICONS 13
+#define NICONS 15
 static const int   IC_Y[12]={8,53,98,143,188,233,278,323,368,413,458,503};
-static const char* IC_LBL[NICONS]={"Terminal","Paint","Code","Word","Creeper","A propos","Reboot","Params","Browser","Snake","R-Type","Pong","MyCraft"};
+static const char* IC_LBL[NICONS]={"Terminal","Paint","Code","Word","Creeper","A propos","Reboot","Params","Browser","Snake","R-Type","Pong","MyCraft","Tetris","Demineur"};
 #define IC_X  6
 #define IC_SZ 32
 /* 12 icones par colonne, colonnes de 76 px */
@@ -3253,6 +3440,26 @@ static void draw_icons(sfcml_Window* win){
                 sfcml_drawPixel(win,ix+(d*11)%IC_SZ,iy+2+(d*5)%7,sfcml_rgb(110,200,90));
             sfcml_drawRect(win,sfcml_rect(ix,iy,IC_SZ,IC_SZ),hov?SFCML_WHITE:sfcml_rgb(60,42,26));
             break;}
+        case 13:{ /* Tetris */
+            sfcml_fillRect(win,sfcml_rect(ix,iy,IC_SZ,IC_SZ),sfcml_rgb(18,18,28));
+            sfcml_fillRect(win,sfcml_rect(ix+4,iy+4,8,8),sfcml_rgb(0,210,210));
+            sfcml_fillRect(win,sfcml_rect(ix+12,iy+4,8,8),sfcml_rgb(220,210,0));
+            sfcml_fillRect(win,sfcml_rect(ix+20,iy+4,8,8),sfcml_rgb(210,40,40));
+            sfcml_fillRect(win,sfcml_rect(ix+8,iy+12,8,8),sfcml_rgb(180,60,200));
+            sfcml_fillRect(win,sfcml_rect(ix+16,iy+12,8,8),sfcml_rgb(40,200,40));
+            sfcml_fillRect(win,sfcml_rect(ix+4,iy+20,8,8),sfcml_rgb(40,80,220));
+            sfcml_fillRect(win,sfcml_rect(ix+20,iy+20,8,8),sfcml_rgb(230,140,20));
+            sfcml_drawRect(win,sfcml_rect(ix,iy,IC_SZ,IC_SZ),hov?SFCML_WHITE:sfcml_rgb(70,70,90));
+            break;}
+        case 14:{ /* Demineur */
+            sfcml_fillRect(win,sfcml_rect(ix,iy,IC_SZ,IC_SZ),sfcml_rgb(190,190,200));
+            for(int gy=0;gy<3;gy++)for(int gx=0;gx<3;gx++)
+                sfcml_drawRect(win,sfcml_rect(ix+3+gx*9,iy+3+gy*9,9,9),sfcml_rgb(120,120,135));
+            sfcml_fillCircle(win,ix+16,iy+16,5,sfcml_rgb(30,30,30));
+            sfcml_fillRect(win,sfcml_rect(ix+15,iy+7,2,4),sfcml_rgb(30,30,30));
+            sfcml_fillRect(win,sfcml_rect(ix+15,iy+21,2,4),sfcml_rgb(30,30,30));
+            sfcml_drawRect(win,sfcml_rect(ix,iy,IC_SZ,IC_SZ),hov?SFCML_WHITE:sfcml_rgb(90,90,105));
+            break;}
         default: /* Navigateur */
             sfcml_fillRect(win,sfcml_rect(ix,iy,IC_SZ,IC_SZ),sfcml_rgb(248,249,250));
             sfcml_drawRect(win,sfcml_rect(ix,iy,IC_SZ,IC_SZ),hov?sfcml_rgb(66,133,244):sfcml_rgb(180,180,200));
@@ -3272,7 +3479,7 @@ static void draw_icons(sfcml_Window* win){
  * ============================================================ */
 #define SM_W   172
 #define SM_IH   22
-#define SM_N    15
+#define SM_N    17
 #define SM_H   (SM_N*SM_IH+8)
 #define SM_Y   (TB_Y-SM_H)
 
@@ -3280,7 +3487,7 @@ static const char* SM_LBL[SM_N]={
     "  Terminal","  Creeper!","  A propos","  ---------",
     "  Paint","  Code Editor","  Word","  Navigateur",
     "  Calculatrice","  Fichiers","  Reseau","  Parametres",
-    "  MyCraft","  ---------","  Redemarrer",
+    "  MyCraft","  Tetris","  Demineur","  ---------","  Redemarrer",
 };
 
 static void draw_smenu(sfcml_Window* win){
@@ -3316,7 +3523,9 @@ static void smenu_click(int mx,int my){
     else if(item==10)win_open(W_NETMGR);
     else if(item==11)win_open(W_SETTINGS);
     else if(item==12)win_open(W_MINE);
-    else if(item==14)cmd_reboot();
+    else if(item==13){win_open(W_TETRIS);tet_reset();}
+    else if(item==14){win_open(W_DEMINE);ms_reset();}
+    else if(item==16)cmd_reboot();
 }
 
 /* ============================================================
@@ -4667,6 +4876,8 @@ static void redraw(sfcml_Window* win){
         else if(i==W_RTYPE)     draw_rtype(win,i);
         else if(i==W_PONG)      draw_pong(win,i);
         else if(i==W_MINE)      draw_mine(win,i);
+        else if(i==W_TETRIS)    draw_tetris(win,i);
+        else if(i==W_DEMINE)    draw_mines(win,i);
     }
     draw_taskbar(win);
     if(_start_open)draw_smenu(win);
@@ -4729,6 +4940,22 @@ static void on_press(int mx,int my,int btn){
             }
         }
     }
+    /* Clic dans la zone de jeu Demineur (gauche=reveler, droit=drapeau) */
+    if(_wins[W_DEMINE].visible&&!_wins[W_DEMINE].minimized){
+        int top=-1;
+        for(int zi=NW-1;zi>=0;zi--){
+            int i=_z[zi];AppWin* w2=&_wins[i];
+            if(!w2->visible||w2->minimized)continue;
+            if(mx>=w2->x&&mx<w2->x+w2->w&&my>=w2->y&&my<w2->y+w2->h){top=i;break;}
+        }
+        if(top==W_DEMINE){
+            AppWin* w2=&_wins[W_DEMINE];
+            if(my>=w2->y+TBAR_H+34&&mx>w2->x&&mx<w2->x+w2->w-1&&my<w2->y+w2->h-1){
+                _rcopen=0;_start_open=0;
+                win_front(W_DEMINE);mines_click(mx,my,btn);return;
+            }
+        }
+    }
     if(btn==1){_rcopen=1;_rcx=mx;_rcy=my;_start_open=0;return;}
     if(_rcopen){rcmenu_click(mx,my);return;}
     if(_start_open){smenu_click(mx,my);return;}
@@ -4782,6 +5009,8 @@ static void on_press(int mx,int my,int btn){
             else if(found==10){win_open(W_RTYPE);rtype_reset();}
             else if(found==11){win_open(W_PONG);pong_reset();}
             else if(found==12)win_open(W_MINE);
+            else if(found==13){win_open(W_TETRIS);tet_reset();}
+            else if(found==14){win_open(W_DEMINE);ms_reset();}
             else{win_open(W_BROWSER);_bnav(0);}
         }
         _sel_icon=found;
@@ -5101,6 +5330,40 @@ static int   _mc_hot;                      /* slot hotbar 0..8 */
 static unsigned _mc_seed=20260705u;
 static int   _mc_fps,_mc_frm;
 static uint32_t _mc_ft;
+static int   _mc_msg_ttl;                  /* HUD message (frames restantes) */
+static const char* _mc_msg="";
+
+/* ---- Sauvegarde du monde sur disque (zone ATA dediee) ----
+ * Le monde (131072 o = 256 secteurs) est trop gros pour une entree
+ * MyFS (512 o). On lui reserve la zone LBA 600.. Superbloc au LBA 599. */
+#define MC_SAVE_LBA  599
+#define MC_WORLD_LBA 600
+static void mc_save(void){
+    if(!_ata_ok){_mc_msg="Pas de disque";_mc_msg_ttl=120;beep(200,60);return;}
+    /* superbloc: magie + position/orientation du joueur */
+    memset(_fs_secbuf,0,512);
+    *(uint32_t*)_fs_secbuf=0x4D435731u;        /* "1WCM" */
+    memcpy(_fs_secbuf+4 ,&_mc_px,4);memcpy(_fs_secbuf+8 ,&_mc_py,4);
+    memcpy(_fs_secbuf+12,&_mc_pz,4);memcpy(_fs_secbuf+16,&_mc_yaw,4);
+    memcpy(_fs_secbuf+20,&_mc_pitch,4);
+    if(!ata_write(MC_SAVE_LBA,_fs_secbuf)){_mc_msg="Echec ecriture";_mc_msg_ttl=120;return;}
+    for(int s=0;s<256;s++)
+        if(!ata_write(MC_WORLD_LBA+(uint32_t)s,_mc_w+s*512)){
+            _mc_msg="Echec ecriture";_mc_msg_ttl=120;return;}
+    _mc_msg="Monde sauvegarde";_mc_msg_ttl=120;
+    beep(N_G5,60);beep(N_C6,90);
+}
+static int mc_load(void){
+    if(!_ata_ok)return 0;
+    if(!ata_read(MC_SAVE_LBA,_fs_secbuf))return 0;
+    if(*(uint32_t*)_fs_secbuf!=0x4D435731u)return 0;
+    memcpy(&_mc_px,_fs_secbuf+4 ,4);memcpy(&_mc_py,_fs_secbuf+8 ,4);
+    memcpy(&_mc_pz,_fs_secbuf+12,4);memcpy(&_mc_yaw,_fs_secbuf+16,4);
+    memcpy(&_mc_pitch,_fs_secbuf+20,4);
+    for(int s=0;s<256;s++)
+        if(!ata_read(MC_WORLD_LBA+(uint32_t)s,_mc_w+s*512))return 0;
+    return 1;
+}
 
 static const uint8_t _mc_hotbar[9]={MC_DIRT,MC_STONE,MC_COBBLE,MC_PLANK,
     MC_LOG,MC_LEAF,MC_SAND,MC_BRICK,MC_GLASS};
@@ -5244,6 +5507,14 @@ static void mine_reset(void){
     _mc_lu=_mc_ld=_mc_ll=_mc_lr=0;
     _mc_hot=0;_mc_look=0;
 }
+/* Ouverture: textures + monde sauvegarde s'il existe, sinon monde neuf */
+static void mine_open_init(void){
+    mine_reset();
+    if(mc_load()){
+        _mc_vy=0;_mc_ground=0;
+        _mc_msg="Monde charge du disque";_mc_msg_ttl=150;
+    }
+}
 
 /* Centre le curseur dans la zone de jeu (pour le mouse-look) */
 static void mc_center_mouse(void){
@@ -5345,7 +5616,7 @@ static void mine_click(int btn){
     int bx,by,bz,vx,vy,vz;
     if(!mc_pick(&bx,&by,&bz,&vx,&vy,&vz))return;
     if(btn==0){  /* casser */
-        if(mc_get(bx,by,bz)!=MC_BEDROCK)mc_set(bx,by,bz,MC_AIR);
+        if(mc_get(bx,by,bz)!=MC_BEDROCK){mc_set(bx,by,bz,MC_AIR);beep(130,45);}
     }else{       /* poser */
         if((unsigned)vx>=MC_XZ||(unsigned)vz>=MC_XZ||(unsigned)vy>=MC_Y)return;
         if(mc_get(vx,vy,vz)!=MC_AIR)return;
@@ -5354,7 +5625,7 @@ static void mine_click(int btn){
         float y0=_mc_py,y1=_mc_py+1.8f;
         if((float)vx<x1&&(float)vx+1>x0&&(float)vz<z1&&(float)vz+1>z0&&
            (float)vy<y1&&(float)vy+1>y0)return;
-        mc_set(vx,vy,vz,_mc_hotbar[_mc_hot]);
+        mc_set(vx,vy,vz,_mc_hotbar[_mc_hot]);beep(340,30);
     }
 }
 
@@ -5370,7 +5641,12 @@ static void mine_key_press(sfcml_KeyCode k){
     else if(k==SFCML_KEY_LEFT)_mc_ll=1;
     else if(k==SFCML_KEY_RIGHT)_mc_lr=1;
     else if(k>=SFCML_KEY_1&&k<=SFCML_KEY_9)_mc_hot=(int)(k-SFCML_KEY_1);
-    else if(k==SFCML_KEY_G)mine_reset();
+    else if(k==SFCML_KEY_G){mine_reset();_mc_msg="Nouveau monde";_mc_msg_ttl=120;}
+    else if(k==SFCML_KEY_F2)mc_save();                 /* sauver le monde */
+    else if(k==SFCML_KEY_F3){                           /* recharger le monde */
+        if(mc_load()){_mc_vy=0;_mc_ground=0;_mc_msg="Monde recharge";_mc_msg_ttl=120;beep(N_E5,60);}
+        else{_mc_msg="Aucune sauvegarde";_mc_msg_ttl=120;beep(200,60);}
+    }
     else if(k==SFCML_KEY_TAB){
         _mc_look=!_mc_look;
         if(_mc_look)mc_center_mouse();
@@ -5515,12 +5791,232 @@ static void draw_mine(sfcml_Window* win,int wi){
     sfcml_drawText(win,hud,cx+6,cy+4,SFCML_WHITE,sfcml_rgb(22,22,28));
     sfcml_drawText(win,"ZQSD:bouger Tab:souris Fleches:regarder Esp:saut ClicG:casser ClicD:poser",
                    cx+6,cy+16,sfcml_rgb(215,215,215),sfcml_rgb(22,22,28));
-    sfcml_drawText(win,"1-9:choisir bloc  G:nouveau monde  Echap:quitter",
+    sfcml_drawText(win,"1-9:bloc  G:monde  F2:sauver  F3:charger  Echap:quitter",
                    cx+6,cy+28,sfcml_rgb(215,215,215),sfcml_rgb(22,22,28));
     if(_mc_look)
         sfcml_drawText(win,"[SOURIS ON - Tab/Echap]",cx+cw-190,cy+4,
                        sfcml_rgb(120,255,120),sfcml_rgb(22,22,28));
     sfcml_drawText(win,_mc_names[_mc_hotbar[_mc_hot]],hx0+1,hy0-12,SFCML_WHITE,sfcml_rgb(22,22,28));
+    /* message HUD temporaire (sauvegarde/chargement) */
+    if(_mc_msg_ttl>0){
+        _mc_msg_ttl--;
+        int mw=(int)strlen(_mc_msg)*8+16;
+        sfcml_fillRect(win,sfcml_rect(cx+cw/2-mw/2,cy+ch/2-40,mw,20),sfcml_rgb(20,20,28));
+        sfcml_drawRect(win,sfcml_rect(cx+cw/2-mw/2,cy+ch/2-40,mw,20),sfcml_rgb(120,200,120));
+        sfcml_drawText(win,_mc_msg,cx+cw/2-mw/2+8,cy+ch/2-34,sfcml_rgb(140,255,140),sfcml_rgb(20,20,28));
+    }
+}
+
+/* ============================================================
+ * TETRIS - from scratch (clavier)
+ * ============================================================ */
+#define TET_W    10
+#define TET_H    20
+#define TET_CELL 18
+static uint8_t _tet_grid[TET_H][TET_W];
+static int _tet_px,_tet_py,_tet_rot,_tet_piece;
+static int _tet_score,_tet_lines,_tet_over,_tet_tick,_tet_speed;
+static unsigned _tet_seed;
+/* 7 tetrominos x 4 rotations, masque 4x4 (bit 0x8000 = coin haut-gauche) */
+static const uint16_t TET[7][4]={
+    {0x0F00,0x2222,0x00F0,0x4444}, /* I */
+    {0x6600,0x6600,0x6600,0x6600}, /* O */
+    {0x4E00,0x4640,0x0E40,0x4C40}, /* T */
+    {0x6C00,0x4620,0x06C0,0x8C40}, /* S */
+    {0xC600,0x2640,0x0C60,0x4C80}, /* Z */
+    {0x8E00,0x6440,0x0E20,0x44C0}, /* J */
+    {0x2E00,0x4460,0x0E80,0xC440}, /* L */
+};
+static const sfcml_Color TET_COL[8]={
+    {0,0,0,255},{0,220,220,255},{220,220,0,255},{180,60,200,255},
+    {40,200,40,255},{220,40,40,255},{40,80,220,255},{230,140,20,255}};
+static int tet_cell(int piece,int rot,int r,int c){
+    return (TET[piece][rot]&(0x8000>>(r*4+c)))?1:0;
+}
+static int tet_collide(int piece,int rot,int px,int py){
+    for(int r=0;r<4;r++)for(int c=0;c<4;c++){
+        if(!tet_cell(piece,rot,r,c))continue;
+        int x=px+c,y=py+r;
+        if(x<0||x>=TET_W||y>=TET_H)return 1;
+        if(y>=0&&_tet_grid[y][x])return 1;
+    }
+    return 0;
+}
+static void tet_spawn(void){
+    _tet_seed=_tet_seed*1103515245u+12345u;
+    _tet_piece=(int)((_tet_seed>>16)%7u);
+    _tet_rot=0;_tet_px=3;_tet_py=-1;
+    if(tet_collide(_tet_piece,_tet_rot,_tet_px,_tet_py)){_tet_over=1;play_melody(MEL_LOSE,3);}
+}
+static void tet_reset(void){
+    memset(_tet_grid,0,sizeof _tet_grid);
+    _tet_score=0;_tet_lines=0;_tet_over=0;_tet_tick=0;_tet_speed=20;
+    if(!_tet_seed)_tet_seed=BIOS_TICKS^0x1234u;
+    tet_spawn();
+}
+static void tet_lock(void){
+    for(int r=0;r<4;r++)for(int c=0;c<4;c++)
+        if(tet_cell(_tet_piece,_tet_rot,r,c)){
+            int x=_tet_px+c,y=_tet_py+r;
+            if(y>=0&&y<TET_H&&x>=0&&x<TET_W)_tet_grid[y][x]=(uint8_t)(_tet_piece+1);
+        }
+    int cleared=0;
+    for(int y=TET_H-1;y>=0;y--){
+        int full=1;
+        for(int x=0;x<TET_W;x++)if(!_tet_grid[y][x]){full=0;break;}
+        if(full){
+            for(int yy=y;yy>0;yy--)memcpy(_tet_grid[yy],_tet_grid[yy-1],TET_W);
+            memset(_tet_grid[0],0,TET_W);
+            cleared++;y++;
+        }
+    }
+    if(cleared){
+        static const int pts[5]={0,40,100,300,1200};
+        _tet_score+=pts[cleared];_tet_lines+=cleared;
+        _tet_speed=20-_tet_lines/5;if(_tet_speed<4)_tet_speed=4;
+        beep(cleared>=4?N_C6:N_G5,80);
+    }
+    tet_spawn();
+}
+static void tet_step(void){
+    if(_tet_over)return;
+    if(++_tet_tick<_tet_speed)return;
+    _tet_tick=0;
+    if(!tet_collide(_tet_piece,_tet_rot,_tet_px,_tet_py+1))_tet_py++;
+    else tet_lock();
+}
+static void tet_key(sfcml_KeyCode k){
+    if(_tet_over){if(k==SFCML_KEY_RETURN)tet_reset();return;}
+    if(k==SFCML_KEY_LEFT){if(!tet_collide(_tet_piece,_tet_rot,_tet_px-1,_tet_py))_tet_px--;}
+    else if(k==SFCML_KEY_RIGHT){if(!tet_collide(_tet_piece,_tet_rot,_tet_px+1,_tet_py))_tet_px++;}
+    else if(k==SFCML_KEY_DOWN){if(!tet_collide(_tet_piece,_tet_rot,_tet_px,_tet_py+1)){_tet_py++;_tet_score++;}}
+    else if(k==SFCML_KEY_UP){int nr=(_tet_rot+1)&3;if(!tet_collide(_tet_piece,nr,_tet_px,_tet_py))_tet_rot=nr;}
+    else if(k==SFCML_KEY_SPACE){while(!tet_collide(_tet_piece,_tet_rot,_tet_px,_tet_py+1)){_tet_py++;_tet_score+=2;}tet_lock();}
+}
+static void draw_tetris(sfcml_Window* win,int wi){
+    AppWin* w=&_wins[wi];
+    int cx=w->x+1,cy=w->y+TBAR_H,cw=w->w-2,ch=w->h-TBAR_H-1;
+    sfcml_fillRect(win,sfcml_rect(cx,cy,cw,ch),sfcml_rgb(18,18,26));
+    int bw=TET_W*TET_CELL,bh=TET_H*TET_CELL;
+    int ox=cx+16,oy=cy+16;
+    sfcml_drawRect(win,sfcml_rect(ox-2,oy-2,bw+4,bh+4),sfcml_rgb(60,60,80));
+    for(int y=0;y<TET_H;y++)for(int x=0;x<TET_W;x++){
+        int v=_tet_grid[y][x];
+        sfcml_Color c=v?TET_COL[v]:sfcml_rgb(26,26,36);
+        sfcml_fillRect(win,sfcml_rect(ox+x*TET_CELL,oy+y*TET_CELL,TET_CELL-1,TET_CELL-1),c);
+    }
+    if(!_tet_over)for(int r=0;r<4;r++)for(int c=0;c<4;c++)
+        if(tet_cell(_tet_piece,_tet_rot,r,c)){
+            int x=_tet_px+c,y=_tet_py+r;
+            if(y>=0)sfcml_fillRect(win,sfcml_rect(ox+x*TET_CELL,oy+y*TET_CELL,TET_CELL-1,TET_CELL-1),TET_COL[_tet_piece+1]);
+        }
+    int px=ox+bw+20;sfcml_Color bg=sfcml_rgb(18,18,26);char nb[12];
+    sfcml_drawText(win,"TETRIS",px,oy,SFCML_WHITE,bg);
+    sfcml_drawText(win,"Score:",px,oy+30,sfcml_rgb(200,200,210),bg);
+    itoa(_tet_score,nb,10);sfcml_drawText(win,nb,px,oy+42,SFCML_WHITE,bg);
+    sfcml_drawText(win,"Lignes:",px,oy+64,sfcml_rgb(200,200,210),bg);
+    itoa(_tet_lines,nb,10);sfcml_drawText(win,nb,px,oy+76,SFCML_WHITE,bg);
+    sfcml_drawText(win,"Fleches: bouger",px,oy+112,sfcml_rgb(150,150,170),bg);
+    sfcml_drawText(win,"Haut: tourner",px,oy+126,sfcml_rgb(150,150,170),bg);
+    sfcml_drawText(win,"Espace: chute",px,oy+140,sfcml_rgb(150,150,170),bg);
+    if(_tet_over){
+        sfcml_drawText(win,"GAME OVER",ox+bw/2-36,oy+bh/2-8,sfcml_rgb(255,80,80),SFCML_BLACK);
+        sfcml_drawText(win,"[Entree=Rejouer]",ox+bw/2-60,oy+bh/2+6,sfcml_rgb(255,200,80),SFCML_BLACK);
+    }
+}
+
+/* ============================================================
+ * DEMINEUR - from scratch (souris)
+ * ============================================================ */
+#define MS_W     12
+#define MS_H     12
+#define MS_MINES 22
+#define MS_CELL  26
+static uint8_t _ms_mine[MS_H][MS_W],_ms_open[MS_H][MS_W],_ms_flag[MS_H][MS_W];
+static int _ms_over,_ms_win,_ms_left;
+static unsigned _ms_seed;
+static int ms_count(int x,int y){
+    int n=0;
+    for(int dy=-1;dy<=1;dy++)for(int dx=-1;dx<=1;dx++){
+        int nx=x+dx,ny=y+dy;
+        if(nx<0||nx>=MS_W||ny<0||ny>=MS_H)continue;
+        if(_ms_mine[ny][nx])n++;
+    }
+    return n;
+}
+static void ms_reset(void){
+    memset(_ms_mine,0,sizeof _ms_mine);
+    memset(_ms_open,0,sizeof _ms_open);
+    memset(_ms_flag,0,sizeof _ms_flag);
+    _ms_over=0;_ms_win=0;_ms_left=MS_W*MS_H-MS_MINES;
+    if(!_ms_seed)_ms_seed=BIOS_TICKS^0x9E3Bu;
+    int placed=0;
+    while(placed<MS_MINES){
+        _ms_seed=_ms_seed*1103515245u+12345u;int x=(int)((_ms_seed>>16)%MS_W);
+        _ms_seed=_ms_seed*1103515245u+12345u;int y=(int)((_ms_seed>>16)%MS_H);
+        if(!_ms_mine[y][x]){_ms_mine[y][x]=1;placed++;}
+    }
+}
+static void ms_reveal(int x,int y){
+    if(x<0||x>=MS_W||y<0||y>=MS_H)return;
+    if(_ms_open[y][x]||_ms_flag[y][x])return;
+    _ms_open[y][x]=1;_ms_left--;
+    if(ms_count(x,y)==0)
+        for(int dy=-1;dy<=1;dy++)for(int dx=-1;dx<=1;dx++)
+            if(dx||dy)ms_reveal(x+dx,y+dy);
+}
+static void mines_click(int mx,int my,int btn){
+    AppWin* w=&_wins[W_DEMINE];
+    int ox=w->x+1+12,oy=w->y+TBAR_H+42;
+    if(_ms_over||_ms_win){ms_reset();return;}
+    int gx=(mx-ox)/MS_CELL,gy=(my-oy)/MS_CELL;
+    if(mx<ox||my<oy||gx<0||gx>=MS_W||gy<0||gy>=MS_H)return;
+    if(btn==1){ if(!_ms_open[gy][gx])_ms_flag[gy][gx]^=1; return; }
+    if(_ms_flag[gy][gx])return;
+    if(_ms_mine[gy][gx]){_ms_open[gy][gx]=1;_ms_over=1;beep(160,120);beep(90,220);return;}
+    ms_reveal(gx,gy);beep(500,20);
+    if(_ms_left<=0){_ms_win=1;play_melody(MEL_WIN,6);}
+}
+static void draw_mines(sfcml_Window* win,int wi){
+    static const sfcml_Color NC[9]={
+        {0,0,0,255},{40,80,220,255},{30,150,40,255},{210,40,40,255},
+        {20,20,140,255},{140,20,20,255},{20,140,140,255},{20,20,20,255},{110,110,110,255}};
+    AppWin* w=&_wins[wi];
+    int cx=w->x+1,cy=w->y+TBAR_H,cw=w->w-2,ch=w->h-TBAR_H-1;
+    sfcml_fillRect(win,sfcml_rect(cx,cy,cw,ch),sfcml_rgb(190,190,200));
+    sfcml_Color hb=sfcml_rgb(60,60,80);char nb[12];
+    int flags=0;for(int y=0;y<MS_H;y++)for(int x=0;x<MS_W;x++)if(_ms_flag[y][x])flags++;
+    sfcml_fillRect(win,sfcml_rect(cx,cy,cw,34),hb);
+    sfcml_drawText(win,"Mines:",cx+10,cy+6,SFCML_WHITE,hb);
+    itoa(MS_MINES-flags,nb,10);sfcml_drawText(win,nb,cx+66,cy+6,sfcml_rgb(255,220,80),hb);
+    const char* st=_ms_over?"BOOM! clic=rejouer":_ms_win?"GAGNE! clic=rejouer":"G:reveler D:drapeau";
+    sfcml_drawText(win,st,cx+120,cy+6,_ms_over?sfcml_rgb(255,120,120):_ms_win?sfcml_rgb(140,255,140):sfcml_rgb(200,200,210),hb);
+    int ox=cx+12,oy=cy+42;
+    for(int y=0;y<MS_H;y++)for(int x=0;x<MS_W;x++){
+        int rx=ox+x*MS_CELL,ry=oy+y*MS_CELL;
+        int op=_ms_open[y][x]||((_ms_over||_ms_win)&&_ms_mine[y][x]);
+        if(!op){
+            sfcml_fillRect(win,sfcml_rect(rx,ry,MS_CELL-1,MS_CELL-1),sfcml_rgb(150,150,165));
+            sfcml_drawHLine(win,rx,ry,MS_CELL-1,sfcml_rgb(210,210,220));
+            sfcml_drawVLine(win,rx,ry,MS_CELL-1,sfcml_rgb(210,210,220));
+            sfcml_drawHLine(win,rx,ry+MS_CELL-2,MS_CELL-1,sfcml_rgb(90,90,105));
+            sfcml_drawVLine(win,rx+MS_CELL-2,ry,MS_CELL-1,sfcml_rgb(90,90,105));
+            if(_ms_flag[y][x]){
+                sfcml_fillRect(win,sfcml_rect(rx+11,ry+5,2,12),sfcml_rgb(40,40,40));
+                sfcml_fillTriangle(win,rx+6,ry+6,rx+12,ry+9,rx+6,ry+12,sfcml_rgb(210,40,40));
+            }
+        }else{
+            sfcml_fillRect(win,sfcml_rect(rx,ry,MS_CELL-1,MS_CELL-1),sfcml_rgb(205,205,212));
+            if(_ms_mine[y][x]){
+                sfcml_Color mc=(_ms_over&&_ms_open[y][x])?sfcml_rgb(210,40,40):sfcml_rgb(30,30,30);
+                sfcml_fillCircle(win,rx+MS_CELL/2-1,ry+MS_CELL/2-1,6,mc);
+            }else{
+                int n=ms_count(x,y);
+                if(n>0){char t[2]={(char)('0'+n),0};
+                    sfcml_drawText(win,t,rx+MS_CELL/2-4,ry+MS_CELL/2-5,NC[n],sfcml_rgb(205,205,212));}
+            }
+        }
+    }
 }
 
 /* ============================================================
@@ -5568,7 +6064,9 @@ void kmain(void){
         strncat(lb,ib,20);
         strncat(lb,net_dhcp_ok?" (DHCP)":" (statique)",14);klog(lb);
     }else klog("rtl8139: absent ou init echouee");
+    klog("son: PC speaker (PIT canal 2) pret");
     klog("bureau: demarrage de l'interface");
+    play_melody(MEL_BOOT,4);   /* jingle de demarrage reel */
 
     C_DK     = sfcml_rgb(0,  48, 90);
     C_TB     = sfcml_rgb(14, 50,110);
@@ -5687,6 +6185,11 @@ void kmain(void){
                         else _wins[W_MINE].minimized=1;  /* 2e: minimise */
                     }
                     else mine_key_press(evt.key.code);
+                } else if(fopen&&foc==W_TETRIS){
+                    if(evt.key.code==SFCML_KEY_ESCAPE)_wins[W_TETRIS].minimized=1;
+                    else tet_key(evt.key.code);
+                } else if(fopen&&foc==W_DEMINE){
+                    if(evt.key.code==SFCML_KEY_ESCAPE)_wins[W_DEMINE].minimized=1;
                 } else {
                     int has_t=_wins[W_TERM].visible&&!_wins[W_TERM].minimized;
                     if(!has_t){if(evt.key.code==SFCML_KEY_ESCAPE)cmd_reboot();break;}
@@ -5753,6 +6256,7 @@ void kmain(void){
             if(_wins[W_RTYPE].visible&&!_wins[W_RTYPE].minimized){rtype_step();dirty=1;}
             if(_wins[W_PONG].visible&&!_wins[W_PONG].minimized){pong_step();dirty=1;}
             if(_wins[W_MINE].visible&&!_wins[W_MINE].minimized){mine_step();dirty=1;}
+            if(_wins[W_TETRIS].visible&&!_wins[W_TETRIS].minimized){tet_step();dirty=1;}
         }
         if(_sleeping){ draw_screensaver(win); }
         else if(dirty){ redraw(win);dirty=0; }

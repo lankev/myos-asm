@@ -550,6 +550,75 @@ int net_init(void){
     net_ok=1;return 1;
 }
 
+/* ============================================================
+ * HTTPS : glue TLS <-> TCP. Fournit send/recv/rng a net/tls.c.
+ * ============================================================ */
+#include "tls.h"
+
+/* RNG : RDTSC + xorshift. Suffisant pour completer le handshake ;
+   PAS de qualite cryptographique (assume dans la demo). */
+static uint64_t _tls_rdtsc(void){uint32_t lo,hi;__asm__ volatile("rdtsc":"=a"(lo),"=d"(hi));return((uint64_t)hi<<32)|lo;}
+static uint32_t _rng_state=0;
+static void tls_rng(void*c,uint8_t*b,int n){
+    (void)c;
+    if(!_rng_state)_rng_state=(uint32_t)_tls_rdtsc()|1u;
+    for(int i=0;i<n;i++){
+        _rng_state^=(uint32_t)_tls_rdtsc();
+        _rng_state^=_rng_state<<13;_rng_state^=_rng_state>>17;_rng_state^=_rng_state<<5;
+        b[i]=(uint8_t)(_rng_state>>((i&3)*8));
+    }
+}
+/* send : un record TLS tient dans un segment (nos records sortants <300o) */
+static int tls_send(void*c,const uint8_t*b,int n){
+    (void)c;
+    tcp_tx(0x18,b,(uint16_t)n);   /* PSH|ACK */
+    _seq+=(uint32_t)n;
+    return n;
+}
+/* recv avec buffer d'un segment ; ACK chaque segment recu */
+static uint8_t _tls_rx[2048];
+static int _tls_rxlen=0,_tls_rxpos=0,_tls_fin=0;
+static int tls_recv(void*c,uint8_t*b,int n){
+    (void)c;
+    if(_tls_rxpos>=_tls_rxlen){
+        if(_tls_fin)return 0;
+        uint8_t fl;int tries=0;
+        for(;;){
+            uint16_t dl=tcp_rx(&fl,_tls_rx,sizeof(_tls_rx),200);
+            if(dl>0){
+                tcp_tx(0x10,0,0);              /* ACK des donnees */
+                _tls_rxlen=dl;_tls_rxpos=0;
+                if(fl&0x01)_tls_fin=1;         /* FIN (on consomme d'abord) */
+                break;
+            }
+            if(fl&0x01){tcp_tx(0x11,0,0);_tls_fin=1;return 0;}
+            if(fl&0x04)return 0;               /* RST */
+            if(++tries>40000)return -1;        /* timeout (patient: internet via NAT) */
+        }
+    }
+    int avail=_tls_rxlen-_tls_rxpos,take=n<avail?n:avail;
+    memcpy(b,_tls_rx+_tls_rxpos,take);_tls_rxpos+=take;
+    return take;
+}
+
+/* GET HTTPS reel : DNS + TCP:443 + TLS 1.2 from scratch */
+int net_https_get(const char*url,char*buf,int bsz){
+    if(!net_ok)return -1;
+    const char*p=url;
+    if(p[0]=='h'&&p[4]=='s'&&p[5]==':'&&p[6]=='/'&&p[7]=='/')p+=8;      /* https:// */
+    else if(p[0]=='h'&&p[4]==':'&&p[5]=='/'&&p[6]=='/')p+=7;            /* http://  */
+    char host[128];int hl=0;
+    while(*p&&*p!='/'&&hl<127)host[hl++]=*p++;
+    host[hl]='\0';
+    const char*path=(*p=='/')?p:"/";
+    uint32_t ip;
+    if(!dns_resolve(host,&ip))return -2;
+    _tls_rxlen=_tls_rxpos=_tls_fin=0;
+    if(!tcp_connect(ip,443))return -3;
+    TlsIO io={0,tls_send,tls_recv,tls_rng};
+    return tls_https_get(&io,host,path,buf,bsz);
+}
+
 int net_http_get(const char*url,char*buf,int bsz){
     if(!net_ok)return -1;
     const char*p=url;
