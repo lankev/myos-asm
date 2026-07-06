@@ -1,7 +1,7 @@
 ================================================================================
                     MyOS - CHANGELOG DES MODIFICATIONS
 ================================================================================
-Auteur des changements : session de developpement assistee (Claude)
+Auteur des changements : lankev
 Cible  : kernel/kmain.c, sfcml/, net/, libc/, kernel/crt0.asm
 Regle  : 100% from scratch, aucune bibliotheque externe.
 Budget : kernel <= 192 Ko (3 chunks de 128 secteurs). Actuel : ~164 Ko.
