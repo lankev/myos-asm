@@ -217,6 +217,59 @@ l'annonce honnetement.
     boucle d'evenements et rendu.
 
 ================================================================================
+ [5] CLIENT TLS 1.2 / HTTPS FROM SCRATCH (net/tls.c)
+================================================================================
+
+Objectif : pouvoir aller sur des sites HTTPS. Un vrai client TLS 1.2 ecrit
+entierement a la main (zero bibliotheque), suite TLS_RSA_WITH_AES_128_CBC_SHA256.
+
+CE QUI EST FAIT ET PROUVE
+  - Primitives crypto from scratch, VERIFIEES contre des references :
+      * AES-128 (chiffrement/dechiffrement, CBC)   -> vecteur FIPS-197 OK
+      * SHA-256 + HMAC-SHA256                        -> RFC 4231 OK
+      * PRF TLS 1.2 (P_SHA256)                       -> identique a la ref Python
+      * RSA : exponentiation modulaire 2048-bit en bignum (mots 32 bits,
+        multiplication ecole + reduction par division binaire)
+        -> m^e mod n identique a pow(m,e,n) de Python
+  - Parsing X.509 DER : extraction de la cle publique RSA (modulus, exposant)
+    depuis le certificat du serveur (fonctionne sur de vrais certificats).
+  - Machine a etats TLS 1.2 complete : ClientHello (avec SNI + signature_algs),
+    ServerHello, Certificate, ServerHelloDone, ClientKeyExchange (premaster
+    chiffre RSA + PKCS#1 v1.5), ChangeCipherSpec, Finished (verify_data via PRF
+    sur le hash du transcript), couche record CBC (MAC-then-encrypt, IV
+    explicite, numeros de sequence), verification du Finished serveur.
+  - VALIDE END-TO-END sur le build hote (memes sources, sockets BSD) :
+      * contre un openssl s_server force en RSA-CBC-SHA256 : handshake accepte
+      * contre le VRAI example.com:443 (Cloudflare) : handshake complet + HTML
+        dechiffre recu ("<title>Example Domain</title>").
+    -> la crypto, le protocole et le parsing X.509 sont CORRECTS.
+
+INTEGRATION DANS L'OS
+  - net/tls.c (client, I/O abstraite par callbacks) + net/tls.h.
+  - net.c : net_https_get() = DNS reel + TCP:443 + TLS ; callbacks send/recv
+    bases sur tcp_tx/tcp_rx, RNG via RDTSC+xorshift.
+  - Commandes shell : "https <hote>" et "wget/curl https://..." (borne ~6s).
+  - Ameliorations de la pile reseau au passage :
+      * dns_resolve : retransmission de la requete (UDP peu fiable en polling)
+      * tcp_rx : suivi du numero de sequence (_rcv_nxt), rejet des doublons /
+        segments hors-ordre (au lieu de concatener aveuglement)
+      * un record TLS = une seule trame TCP (les 4 descripteurs TX du RTL8139
+        etaient satures quand en-tete et corps partaient separement)
+
+LIMITATION CONNUE (dans l'OS uniquement)
+  - Dans MyOS, le handshake demarre reellement : DNS, connexion TCP:443,
+    ClientHello envoye, ServerHello + le VRAI certificat du serveur recus
+    (~6 Ko) via la pile TCP/IP maison. Mais la reception du certificat cale :
+    la pile TCP en polling perd ~9 octets pendant la rafale de 6 Ko (le
+    serveur envoie 6071 o, l'OS les ACK tous, mais la couche record n'en
+    recoit que 6062). Diagnostique via capture pcap + lecture memoire par le
+    moniteur QEMU ; c'est une limite du reassemblage TCP maison, PAS du code
+    TLS (identique et fonctionnel sur l'hote). https se termine proprement par
+    un timeout (~6s) au lieu de completer.
+  - Piste pour finir : un vrai buffer de reassemblage TCP (accepter les
+    segments hors-ordre et les ordonner) plutot que le buffer mono-segment.
+
+================================================================================
  RECAPITULATIF DES FICHIERS MODIFIES
 ================================================================================
   kernel/kmain.c          jeu MyCraft, mouse-look, IDT/PIC/PIT, ATA, MyFS,
@@ -230,7 +283,10 @@ l'annonce honnetement.
   net/net.h               declarations reseau
   libc/src/stdlib.c       malloc_stats, heap deplace a 0x500000
   libc/include/stdlib.h   declaration malloc_stats
-  Makefile                flags audio (-audiodev/pcspk) pour le son reel
+  Makefile                flags audio (-audiodev/pcspk) + net/tls.c
+  net/tls.c, net/tls.h    client TLS 1.2 from scratch (AES/RSA/HMAC/PRF/X.509)
+  net/net.c               net_https_get, glue TLS<->TCP, DNS retry, suivi seq TCP
+  net/net.h               declaration net_https_get
 
 ================================================================================
  ETAT

@@ -2278,6 +2278,25 @@ static void handle_command(void){
             }
         }
     }
+    else if(!strcmp(inp,"htest")){
+        /* test HTTPS a URL codee en dur (frappe fiable) */
+        t_print("GET https://example.com/ (TLS 1.2 from scratch)...\n");
+        int n=net_https_get("https://example.com/",_wget_buf,(int)sizeof(_wget_buf)-1);
+        if(n<0){extern int tls_stage;
+            t_print("echec code ");_sh_puti(n);t_print(" etape=");_sh_puti(tls_stage);t_print("\n");
+        }else{_wget_buf[n]='\0';t_print("OK ");_sh_puti(n);t_print(" octets:\n");
+            int sh=n>800?800:n;char sv=_wget_buf[sh];_wget_buf[sh]='\0';t_print(_wget_buf);_wget_buf[sh]=sv;t_print("\n");}
+    }
+    else if(!strcmp(inp,"rsabench")){
+        extern uint32_t tls_bench_modexp(void);
+        t_print("RSA 2048-bit modexp x3...\n");
+        uint32_t t0=BIOS_TICKS;
+        volatile uint32_t s=0;
+        for(int i=0;i<3;i++)s^=tls_bench_modexp();
+        uint32_t dt=BIOS_TICKS-t0;
+        t_print("3 modexp en ");_sh_puti((int)dt);t_print(" ticks (~");
+        _sh_puti((int)(dt*1000/18/3));t_print(" ms/op)\n");
+    }
     else if(!strcmp(inp,"https")||_sh_sw(inp,"https ")){
         /* GET HTTPS via le client TLS 1.2 from scratch */
         if(!net_ok)t_print("reseau indisponible\n");

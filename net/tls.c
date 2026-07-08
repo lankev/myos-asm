@@ -225,13 +225,17 @@ static int io_send_all(TLS*t,const uint8_t*b,int n){
 static int io_recv_all(TLS*t,uint8_t*b,int n){
     int off=0;while(off<n){int r=t->io->recv(t->io->ctx,b+off,n-off);if(r<=0)return -1;off+=r;}return 0;
 }
-/* envoie un record TLS (type, payload). Chiffre si encrypted. */
+/* envoie un record TLS (type, payload) EN UNE SEULE TRAME. Chiffre si encrypted.
+ * Note importante (OS) : le NIC RTL8139 n'a que 4 descripteurs TX ; envoyer
+ * l'en-tete et le corps en deux tcp_tx separes doublait le nombre de trames et
+ * saturait l'anneau lors de la flight CKE+CCS+Finished. Un record = une trame. */
 static int rec_send(TLS*t,int type,const uint8_t*data,int len){
-    uint8_t hdr[5];
+    static uint8_t out[5+16+16384+64];
     if(!t->encrypted){
-        hdr[0]=(uint8_t)type;hdr[1]=3;hdr[2]=3;hdr[3]=(uint8_t)(len>>8);hdr[4]=(uint8_t)len;
-        if(io_send_all(t,hdr,5)<0)return -1;
-        return io_send_all(t,data,len);
+        out[0]=(uint8_t)type;out[1]=3;out[2]=3;out[3]=(uint8_t)(len>>8);out[4]=(uint8_t)len;
+        memcpy(out+5,data,len);
+        int r=io_send_all(t,out,5+len);
+        return r;
     }
     /* MAC = HMAC(cwmac, seq(8)||type||ver||len||data) */
     static uint8_t macin[13+16384];
@@ -239,20 +243,19 @@ static int rec_send(TLS*t,int type,const uint8_t*data,int len){
     macin[8]=(uint8_t)type;macin[9]=3;macin[10]=3;macin[11]=(uint8_t)(len>>8);macin[12]=(uint8_t)len;
     memcpy(macin+13,data,len);
     uint8_t mac[32];hmac_sha256(t->cwmac,32,macin,13+len,mac);
-    /* contenu = data || mac || padding */
-    static uint8_t body[16384];int bl=0;
+    /* corps chiffre = IV(16) || AES-CBC( data || mac || padding ) */
+    uint8_t iv[16];t->io->rng(t->io->ctx,iv,16);
+    uint8_t* frag=out+5;
+    memcpy(frag,iv,16);
+    int bl=0;uint8_t* body=frag+16;
     memcpy(body,data,len);bl+=len;memcpy(body+bl,mac,32);bl+=32;
     int pad=16-(bl%16);for(int i=0;i<pad;i++)body[bl+i]=(uint8_t)(pad-1);bl+=pad;
-    /* IV explicite aleatoire */
-    uint8_t iv[16];t->io->rng(t->io->ctx,iv,16);
-    static uint8_t frag[16+16384];memcpy(frag,iv,16);memcpy(frag+16,body,bl);
     AES a;aes_key(&a,t->cwkey);
     uint8_t iv2[16];memcpy(iv2,iv,16);
-    aes_cbc_enc(&a,iv2,frag+16,bl);
+    aes_cbc_enc(&a,iv2,body,bl);
     int total=16+bl;
-    hdr[0]=(uint8_t)type;hdr[1]=3;hdr[2]=3;hdr[3]=(uint8_t)(total>>8);hdr[4]=(uint8_t)total;
-    if(io_send_all(t,hdr,5)<0)return -1;
-    if(io_send_all(t,frag,total)<0)return -1;
+    out[0]=(uint8_t)type;out[1]=3;out[2]=3;out[3]=(uint8_t)(total>>8);out[4]=(uint8_t)total;
+    if(io_send_all(t,out,5+total)<0)return -1;
     t->wseq++;
     return 0;
 }
@@ -299,7 +302,8 @@ static int hs_read(TLS*t,uint8_t*out,int n){
 /* ================= Handshake ================= */
 static void put_u24(uint8_t*p,int v){p[0]=(uint8_t)(v>>16);p[1]=(uint8_t)(v>>8);p[2]=(uint8_t)v;}
 
-int tls_stage=0;   /* diagnostic: derniere etape atteinte */
+int tls_stage=0;   /* derniere etape atteinte (pour message d'erreur) */
+#define STAGE(n) do{tls_stage=(n);}while(0)
 
 static int tls_handshake(TLS*t,const char*host){
     tls_stage=0;
@@ -329,12 +333,12 @@ static int tls_handshake(TLS*t,const char*host){
     uint8_t msg[600];msg[0]=1;put_u24(msg+1,p);memcpy(msg+4,hs,p);
     tr_add(t,msg,4+p);
     if(rec_send(t,22,msg,4+p)<0)return -1;
-    tls_stage=1;   /* ClientHello envoye */
+    STAGE(1);   /* ClientHello envoye */
 
     /* ---- ServerHello ---- */
     uint8_t h[4];
     if(hs_read(t,h,4)<0)return -1;
-    tls_stage=2;   /* premier octet de reponse serveur recu */
+    STAGE(2);   /* premier octet de reponse serveur recu */
     if(h[0]!=2)return -2;                   /* ServerHello attendu */
     int shlen=(h[1]<<16)|(h[2]<<8)|h[3];
     uint8_t sh[1024];if(shlen>(int)sizeof sh)return -1;
@@ -354,7 +358,7 @@ static int tls_handshake(TLS*t,const char*host){
     /* cert[0..2]=longueur totale liste, [3..5]=longueur 1er cert */
     int c1=(cert[3]<<16)|(cert[4]<<8)|cert[5];
     if(!x509_pubkey(cert+6,c1,t->n,&t->nlen,t->e,&t->elen))return -5;
-    tls_stage=3;   /* certificat recu et cle RSA extraite */
+    STAGE(3);   /* certificat recu et cle RSA extraite */
     DBG("Certificate: cle RSA n=%d octets e=%d octets\n",t->nlen,t->elen);
 
     /* ---- ServerHelloDone (ou d'autres messages avant) ---- */
@@ -378,12 +382,12 @@ static int tls_handshake(TLS*t,const char*host){
     BN N,E,M,C;bn_from_be(&N,t->n,t->nlen);bn_from_be(&E,t->e,t->elen);bn_from_be(&M,em,k);
     bn_modexp(&C,&M,&E,&N);
     uint8_t enc[512];bn_to_be(&C,enc,k);
-    tls_stage=4;   /* ServerHelloDone recu, RSA chiffre le premaster */
+    STAGE(4);   /* ServerHelloDone recu, RSA chiffre le premaster */
     uint8_t cke[520];cke[0]=16;put_u24(cke+1,k+2);cke[4]=(uint8_t)(k>>8);cke[5]=(uint8_t)k;
     memcpy(cke+6,enc,k);
     tr_add(t,cke,6+k);
     if(rec_send(t,22,cke,6+k)<0)return -1;
-    tls_stage=5;   /* ClientKeyExchange envoye */
+    STAGE(5);   /* ClientKeyExchange envoye */
 
     /* ---- master secret + cles ---- */
     uint8_t seed[64];memcpy(seed,t->crand,32);memcpy(seed+32,t->srand,32);
@@ -403,7 +407,7 @@ static int tls_handshake(TLS*t,const char*host){
     uint8_t fin[16];fin[0]=20;put_u24(fin+1,12);memcpy(fin+4,vd,12);
     tr_add(t,fin,16);                       /* inclus pour le hash du Finished serveur */
     if(rec_send(t,22,fin,16)<0)return -1;
-    tls_stage=6;   /* CCS + Finished client envoyes */
+    STAGE(6);   /* CCS + Finished client envoyes */
 
     DBG("Client Finished envoye, attente reponse serveur...\n");
     /* ---- ChangeCipherSpec serveur ---- */
@@ -423,10 +427,25 @@ static int tls_handshake(TLS*t,const char*host){
     /* (tr_add du Finished serveur a deja ajoute h+svd ; on recalcule sur la partie avant) */
     uint8_t thash2[32];sha256(t->tr,t->trlen-16,thash2);
     uint8_t expvd[12];tls_prf(t->master,48,"server finished",thash2,32,expvd,12);
-    tls_stage=7;   /* Finished serveur recu */
+    STAGE(7);   /* Finished serveur recu */
     if(memcmp(svd,expvd,12)!=0)return -8;    /* Finished serveur invalide */
-    tls_stage=8;   /* handshake complet, canal chiffre valide */
+    STAGE(8);   /* handshake complet, canal chiffre valide */
     return 0;   /* handshake OK, canal chiffre etabli */
+}
+
+/* Banc d'essai RSA : un modexp 2048-bit avec des valeurs fixes.
+ * Sert a mesurer la vitesse du RSA en QEMU (isole du reseau). */
+uint32_t tls_bench_modexp(void){
+    static const char Nh[]="dee22fc4723403cb4cde80f1dad4039711183cb5810667b3e2c3b7fce1e959102";
+    uint8_t nb[256];for(int i=0;i<256;i++)nb[i]=(uint8_t)(0xA5^(i*7));
+    for(int i=0;i<32;i++){int hi=Nh[i*2],lo=Nh[i*2+1];
+        int hv=(hi<='9')?hi-'0':hi-'a'+10,lv=(lo<='9')?lo-'0':lo-'a'+10;
+        nb[i]=(uint8_t)((hv<<4)|lv);}
+    nb[0]|=0x80;nb[255]|=1;              /* impair, bit haut */
+    uint8_t mb[256];for(int i=0;i<256;i++)mb[i]=(uint8_t)(i*3+1);mb[0]=0;
+    BN N,E,M,C;bn_from_be(&N,nb,256);bn_from_be(&M,mb,256);bn_zero(&E);E.w[0]=65537;
+    bn_modexp(&C,&M,&E,&N);
+    return C.w[0];
 }
 
 /* GET HTTPS : handshake puis requete, remplit out (corps+entetes brut). */

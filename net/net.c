@@ -215,39 +215,42 @@ static int dns_resolve(const char*host,uint32_t*ip){
     iph->ttl=64;iph->pr=17;iph->cs=0;iph->s=htonl(MY_IP);iph->d=htonl(DNS_IP);
     iph->cs=cksum(iph,20);
     memcpy(fr+34,udp,8+ql);
-    rtl_tx(fr,(uint16_t)(14+20+8+ql));
     uint8_t rb[1500];
-    for(int i=0;i<1000000;i++){
-        uint16_t l=rtl_rx(rb,5);
-        if(l<42)continue;
-        EH*re=(EH*)rb;if(ntohs(re->t)!=0x0800)continue;
-        IH*ri=(IH*)(rb+14);if(ri->pr!=17)continue;
-        UH*ru=(UH*)(rb+34);if(ntohs(ru->dp)!=12345)continue;
-        uint8_t*dns=rb+42;int dlen=l-42;
-        if(!(dns[2]&0x80))continue;
-        int dpos=12;
-        int qc=(dns[4]<<8)|dns[5];
-        for(int j=0;j<qc&&dpos<dlen;j++){
-            while(dpos<dlen&&dns[dpos]!=0){
-                if((dns[dpos]&0xC0)==0xC0){dpos+=2;break;}
-                dpos+=dns[dpos]+1;
+    /* UDP peu fiable en polling : on retransmet la requete a chaque tentative */
+    for(int attempt=0;attempt<8;attempt++){
+        rtl_tx(fr,(uint16_t)(14+20+8+ql));
+        for(int i=0;i<60000;i++){
+            uint16_t l=rtl_rx(rb,5);
+            if(l<42)continue;
+            EH*re=(EH*)rb;if(ntohs(re->t)!=0x0800)continue;
+            IH*ri=(IH*)(rb+14);if(ri->pr!=17)continue;
+            UH*ru=(UH*)(rb+34);if(ntohs(ru->dp)!=12345)continue;
+            uint8_t*dns=rb+42;int dlen=l-42;
+            if(!(dns[2]&0x80))continue;
+            int dpos=12;
+            int qc=(dns[4]<<8)|dns[5];
+            for(int j=0;j<qc&&dpos<dlen;j++){
+                while(dpos<dlen&&dns[dpos]!=0){
+                    if((dns[dpos]&0xC0)==0xC0){dpos+=2;break;}
+                    dpos+=dns[dpos]+1;
+                }
+                if(dns[dpos]!=0){}else{dpos++;}
+                dpos+=4;
             }
-            if(dns[dpos]!=0){}else{dpos++;}
-            dpos+=4;
-        }
-        int ac=(dns[6]<<8)|dns[7];
-        for(int j=0;j<ac&&dpos+12<=dlen;j++){
-            if((dns[dpos]&0xC0)==0xC0)dpos+=2;
-            else{while(dpos<dlen&&dns[dpos])dpos+=dns[dpos]+1;dpos++;}
-            uint16_t rt=(uint16_t)((dns[dpos]<<8)|dns[dpos+1]);
-            uint16_t rdl=(uint16_t)((dns[dpos+8]<<8)|dns[dpos+9]);
-            dpos+=10;
-            if(rt==1&&rdl==4){
-                *ip=((uint32_t)dns[dpos]<<24)|((uint32_t)dns[dpos+1]<<16)|
-                    ((uint32_t)dns[dpos+2]<<8)|dns[dpos+3];
-                return 1;
+            int ac=(dns[6]<<8)|dns[7];
+            for(int j=0;j<ac&&dpos+12<=dlen;j++){
+                if((dns[dpos]&0xC0)==0xC0)dpos+=2;
+                else{while(dpos<dlen&&dns[dpos])dpos+=dns[dpos]+1;dpos++;}
+                uint16_t rt=(uint16_t)((dns[dpos]<<8)|dns[dpos+1]);
+                uint16_t rdl=(uint16_t)((dns[dpos+8]<<8)|dns[dpos+9]);
+                dpos+=10;
+                if(rt==1&&rdl==4){
+                    *ip=((uint32_t)dns[dpos]<<24)|((uint32_t)dns[dpos+1]<<16)|
+                        ((uint32_t)dns[dpos+2]<<8)|dns[dpos+3];
+                    return 1;
+                }
+                dpos+=rdl;
             }
-            dpos+=rdl;
         }
     }
     return 0;
@@ -257,6 +260,7 @@ static int dns_resolve(const char*host,uint32_t*ip){
 static uint32_t _dst_ip;
 static uint16_t _dst_port,_src_port;
 static uint32_t _seq,_ackn;
+static uint32_t _rcv_nxt;     /* prochain numero de sequence attendu (reassemblage) */
 static uint8_t  _dst_mac[6];
 static uint16_t _next_port=49152;
 
@@ -272,7 +276,9 @@ static void tcp_tx(uint8_t fl,const void*data,uint16_t dl){
     TH*t=(TH*)(fr+34);
     t->sp=htons(_src_port);t->dp=htons(_dst_port);
     t->sq=htonl(_seq);t->ak=htonl(_ackn);
-    t->off=0x50;t->fl=fl;t->wn=htons(8192);t->cs=0;t->ug=0;
+    /* fenetre reduite : le serveur n'envoie pas plus que ce que l'anneau RX
+       de 8 Ko peut absorber pendant qu'on traite (evite les pertes en rafale) */
+    t->off=0x50;t->fl=fl;t->wn=htons(2920);t->cs=0;t->ug=0;
     if(dl>0)memcpy(fr+54,data,dl);
     t->cs=tcp_cs(htonl(MY_IP),htonl(_dst_ip),t,tl);
     rtl_tx(fr,(uint16_t)(14+20+tl));
@@ -287,17 +293,27 @@ static uint16_t tcp_rx(uint8_t*ofl,void*data,uint16_t bsz,uint32_t iters){
         if(ntohl(ip->s)!=_dst_ip)continue;
         TH*th=(TH*)(buf+34);
         if(ntohs(th->dp)!=_src_port||ntohs(th->sp)!=_dst_port)continue;
-        *ofl=th->fl;
         uint16_t doff=(uint16_t)((th->off>>4)*4);
         uint16_t iplen=ntohs(ip->len);
         uint16_t dl=(uint16_t)(iplen-20-doff);
         if(dl>bsz)dl=bsz;
-        if(dl>0&&data)memcpy(data,buf+34+doff,dl);
-        uint32_t na=ntohl(th->sq)+dl;
-        if(th->fl&0x02)na++;
-        if(th->fl&0x01)na++;
-        _ackn=na;
-        return dl;
+        uint32_t seg=ntohl(th->sq);
+        *ofl=th->fl;
+        /* SYN-ACK : initialise le numero de sequence attendu */
+        if(th->fl&0x02){_rcv_nxt=seg+1;_ackn=_rcv_nxt;return 0;}
+        if(dl>0){
+            if(seg!=_rcv_nxt){        /* doublon / hors-ordre : ignore, re-ACK */
+                _ackn=_rcv_nxt;continue;
+            }
+            if(data)memcpy(data,buf+34+doff,dl);
+            _rcv_nxt=seg+dl;
+            if(th->fl&0x01)_rcv_nxt++;   /* FIN accompagnant des donnees */
+            _ackn=_rcv_nxt;
+            return dl;
+        }
+        /* pas de donnees : FIN eventuel dans l'ordre */
+        if(th->fl&0x01){if(seg==_rcv_nxt)_rcv_nxt++;_ackn=_rcv_nxt;}
+        return 0;
     }
     return 0;
 }
@@ -568,32 +584,37 @@ static void tls_rng(void*c,uint8_t*b,int n){
         b[i]=(uint8_t)(_rng_state>>((i&3)*8));
     }
 }
-/* send : un record TLS tient dans un segment (nos records sortants <300o) */
+/* send : decoupe en segments <= MSS (tcp_tx a un buffer de trame de 1500 o).
+   io_send_all (cote tls.c) boucle sur la valeur retournee. */
 static int tls_send(void*c,const uint8_t*b,int n){
     (void)c;
-    tcp_tx(0x18,b,(uint16_t)n);   /* PSH|ACK */
-    _seq+=(uint32_t)n;
-    return n;
+    int chunk=n>1400?1400:n;
+    tcp_tx(0x18,b,(uint16_t)chunk);   /* PSH|ACK */
+    _seq+=(uint32_t)chunk;
+    return chunk;
 }
-/* recv avec buffer d'un segment ; ACK chaque segment recu */
+/* recv : un segment TCP a la fois, ACK, livraison a la demande.
+   Deadline global (ticks PIT) pour borner le temps total du handshake. */
 static uint8_t _tls_rx[2048];
 static int _tls_rxlen=0,_tls_rxpos=0,_tls_fin=0;
+static uint32_t _tls_deadline=0;
 static int tls_recv(void*c,uint8_t*b,int n){
     (void)c;
     if(_tls_rxpos>=_tls_rxlen){
         if(_tls_fin)return 0;
         uint8_t fl;int tries=0;
         for(;;){
-            uint16_t dl=tcp_rx(&fl,_tls_rx,sizeof(_tls_rx),200);
+            if(*(volatile uint32_t*)0x046C>_tls_deadline)return -1;  /* deadline global */
+            uint16_t dl=tcp_rx(&fl,_tls_rx,sizeof(_tls_rx),120);
             if(dl>0){
-                tcp_tx(0x10,0,0);              /* ACK des donnees */
+                tcp_tx(0x10,0,0);
                 _tls_rxlen=dl;_tls_rxpos=0;
-                if(fl&0x01)_tls_fin=1;         /* FIN (on consomme d'abord) */
+                if(fl&0x01)_tls_fin=1;
                 break;
             }
             if(fl&0x01){tcp_tx(0x11,0,0);_tls_fin=1;return 0;}
-            if(fl&0x04)return 0;               /* RST */
-            if(++tries>40000)return -1;        /* timeout (patient: internet via NAT) */
+            if(fl&0x04)return 0;
+            if(++tries>500)return -1;
         }
     }
     int avail=_tls_rxlen-_tls_rxpos,take=n<avail?n:avail;
@@ -614,6 +635,7 @@ int net_https_get(const char*url,char*buf,int bsz){
     uint32_t ip;
     if(!dns_resolve(host,&ip))return -2;
     _tls_rxlen=_tls_rxpos=_tls_fin=0;
+    _tls_deadline=*(volatile uint32_t*)0x046C+110;   /* ~6s (PIT 18.2 Hz) */
     if(!tcp_connect(ip,443))return -3;
     TlsIO io={0,tls_send,tls_recv,tls_rng};
     return tls_https_get(&io,host,path,buf,bsz);
