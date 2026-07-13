@@ -270,6 +270,35 @@ LIMITATION CONNUE (dans l'OS uniquement)
     segments hors-ordre et les ordonner) plutot que le buffer mono-segment.
 
 ================================================================================
+ [6] LANCER ENTROPY LOOP (.exe Windows) DEPUIS MyOS  --  pont serie
+================================================================================
+
+CONSTAT
+  Entropy Loop est un jeu Windows 64-bit (Unity + DirectX 12 + Mono,
+  UnityPlayer.dll = 35 Mo). MyOS (32-bit, 192 Ko, dans QEMU) ne peut PAS
+  l'executer : ni chargeur PE 64-bit, ni Win32, ni DirectX, ni GPU, ni Mono.
+  Aucune bibliotheque n'y change rien -- ce n'est pas un probleme de lib.
+
+SOLUTION : MyOS = LANCEUR / TELECOMMANDE
+  - MyOS n'execute pas le jeu, il le DECLENCHE. Une icone "Entropy" (ou la
+    commande shell "entropy") ecrit "LAUNCH_ENTROPY" sur le port serie COM1.
+  - QEMU expose COM1 en TCP (-serial tcp:127.0.0.1:5599,server,nowait).
+  - entropy-launcher/play.py (a lancer depuis WSL) ouvre MyOS dans QEMU, lit
+    le port serie, et fait Start-Process du vrai jeu sur Windows au signal.
+  - Le jeu tourne sur Windows (la ou il peut) mais c'est bien MyOS qui le lance.
+
+  Verifie de bout en bout : la commande ET l'icone envoient bien le signal par
+  le port serie (test headless) ; le jeu se lance et tourne sur Windows
+  (Player.log : assets charges, physique et gameplay OK ; les
+  NullReferenceException audio sont un bug du jeu, pas du lanceur).
+
+  Utilisation :  python3 entropy-launcher/play.py   puis, dans MyOS, "entropy"
+                 (ou double-clic l'icone Entropy sur le bureau).
+
+  Fichiers : kernel/kmain.c (serial_init/serial_puts COM1, commande + icone),
+             entropy-launcher/play.py + README.txt (dossier a part).
+
+================================================================================
  RECAPITULATIF DES FICHIERS MODIFIES
 ================================================================================
   kernel/kmain.c          jeu MyCraft, mouse-look, IDT/PIC/PIT, ATA, MyFS,

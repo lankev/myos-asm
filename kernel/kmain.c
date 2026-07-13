@@ -61,6 +61,29 @@ static inline uint32_t k_inl(uint16_t p){uint32_t v;__asm__ volatile("inl %1,%0"
 static inline void k_outl(uint16_t p,uint32_t v){__asm__ volatile("outl %0,%1"::"a"(v),"Nd"(p));}
 
 /* ============================================================
+ * Port serie COM1 (0x3F8) : pont vers l'hote.
+ * MyOS ne peut pas executer un binaire Windows ; a la place il
+ * ENVOIE une commande a l'hote par le port serie, et un petit
+ * agent cote Windows lance le vrai jeu. MyOS = lanceur/telecommande.
+ * ============================================================ */
+#define COM1 0x3F8
+static void serial_init(void){
+    k_outb(COM1+1,0x00);   /* pas d'IRQ */
+    k_outb(COM1+3,0x80);   /* DLAB=1 */
+    k_outb(COM1+0,0x03);   /* diviseur bas (38400 bauds) */
+    k_outb(COM1+1,0x00);   /* diviseur haut */
+    k_outb(COM1+3,0x03);   /* 8N1 */
+    k_outb(COM1+2,0xC7);   /* FIFO active, seuil 14 */
+    k_outb(COM1+4,0x0B);   /* RTS/DSR actifs */
+}
+static void serial_puts(const char* s){
+    for(;*s;s++){
+        for(int g=0;g<100000&&!(k_inb(COM1+5)&0x20);g++){} /* attend THR vide */
+        k_outb(COM1,(uint8_t)*s);
+    }
+}
+
+/* ============================================================
  * Journal noyau (dmesg reel) - ring buffer texte
  * ============================================================ */
 #define KLOG_SZ 4096
@@ -2278,6 +2301,12 @@ static void handle_command(void){
             }
         }
     }
+    else if(!strcmp(inp,"entropy")||!strcmp(inp,"play-entropy")){
+        /* demande a l'hote de lancer le vrai jeu Windows (via le port serie) */
+        serial_puts("LAUNCH_ENTROPY\n");
+        t_print("Signal envoye a l'hote : lancement d'Entropy Loop...\n");
+        t_print("(le jeu Windows s'ouvre hors de MyOS ; l'agent play.py doit tourner)\n");
+    }
     else if(!strcmp(inp,"htest")){
         /* test HTTPS a URL codee en dur (frappe fiable) */
         t_print("GET https://example.com/ (TLS 1.2 from scratch)...\n");
@@ -2296,6 +2325,75 @@ static void handle_command(void){
         uint32_t dt=BIOS_TICKS-t0;
         t_print("3 modexp en ");_sh_puti((int)dt);t_print(" ticks (~");
         _sh_puti((int)(dt*1000/18/3));t_print(" ms/op)\n");
+    }
+    else if(!strcmp(inp,"bench")){
+        /* Benchmark: mesures reelles via le timer PIT (18.2 Hz).
+           Tous les calculs de debit en double (FPU) -> pas de div 64 bits. */
+        extern uint32_t tls_bench_modexp(void);
+        t_print("===== MyOS Benchmark (sous QEMU) =====\n");
+        uint32_t t0,dt; volatile uint32_t sink=0;
+        const double HZ=18.2065;
+
+        /* CPU : frequence mesuree TSC vs PIT */
+        {   uint32_t g=0;t0=BIOS_TICKS;while(BIOS_TICKS==t0&&++g<80000000u);
+            uint64_t r0=k_rdtsc();uint32_t st=BIOS_TICKS;g=0;
+            while(BIOS_TICKS<st+9&&++g<400000000u);
+            uint64_t r1=k_rdtsc();uint32_t dd=BIOS_TICKS-st;if(!dd)dd=1;
+            double mhz=(double)(uint32_t)(r1-r0)*HZ/(double)dd/1000000.0;
+            t_print("CPU        : ");_sh_puti((int)mhz);t_print(" MHz\n"); }
+
+        /* Entier : x = x*a + c (millions d'ops par lot) */
+        {   uint32_t x=1,it=0;t0=BIOS_TICKS;
+            while((dt=BIOS_TICKS-t0)<18){for(int k=0;k<1000000;k++)x=x*1103515245u+12345u;it++;}
+            sink^=x;double sec=(double)dt/HZ;
+            t_print("Entier     : ");_sh_puti((int)((double)it/sec));t_print(" Mops/s\n"); }
+
+        /* FPU : f = f*a + b (2 flops par iter) */
+        {   float f=1.0001f;uint32_t it=0;t0=BIOS_TICKS;
+            while((dt=BIOS_TICKS-t0)<18){for(int k=0;k<1000000;k++){f=f*1.000001f+0.5f;if(f>1e9f)f=1.0f;}it++;}
+            sink^=(uint32_t)f;double sec=(double)dt/HZ;
+            t_print("FPU        : ");_sh_puti((int)((double)it*2.0/sec));t_print(" MFLOP/s\n"); }
+
+        /* Memoire : memcpy 16 Ko depuis le backbuffer */
+        {   uint8_t buf[16384];uint32_t it=0;t0=BIOS_TICKS;
+            while((dt=BIOS_TICKS-t0)<18){memcpy(buf,(void*)0x300000,16384);it++;}
+            sink^=buf[0];double sec=(double)dt/HZ;
+            t_print("Memoire    : ");_sh_puti((int)((double)it*16384.0/1048576.0/sec));t_print(" Mo/s (memcpy)\n"); }
+
+        /* SHA-256 : hash d'un bloc de 4 Ko (entree variee -> pas de hoisting) */
+        {   uint8_t d[32];uint8_t b4[4096];for(int i=0;i<4096;i++)b4[i]=(uint8_t)i;
+            uint32_t it=0;t0=BIOS_TICKS;d[0]=0;
+            while((dt=BIOS_TICKS-t0)<18){b4[0]=(uint8_t)(it^d[0]);k_sha256(b4,4096,d);it++;}
+            sink^=d[0];double sec=(double)dt/HZ;
+            t_print("SHA-256    : ");_sh_puti((int)((double)it*4096.0/1048576.0*1000.0/sec));t_print(" Ko/s\n"); }
+
+        /* MD5 : hash d'un bloc de 4 Ko (entree variee) */
+        {   uint8_t d[16];uint8_t b4[4096];for(int i=0;i<4096;i++)b4[i]=(uint8_t)i;
+            uint32_t it=0;t0=BIOS_TICKS;d[0]=0;
+            while((dt=BIOS_TICKS-t0)<18){b4[0]=(uint8_t)(it^d[0]);k_md5(b4,4096,d);it++;}
+            sink^=d[0];double sec=(double)dt/HZ;
+            t_print("MD5        : ");_sh_puti((int)((double)it*4096.0/1048576.0*1000.0/sec));t_print(" Ko/s\n"); }
+
+        /* RSA-2048 : cout d'un handshake (echange de cle) */
+        {   int n=0;t0=BIOS_TICKS;
+            while((dt=BIOS_TICKS-t0)<9){sink^=tls_bench_modexp();n++;}
+            if(!n)n=1;double sec=(double)dt/HZ;
+            t_print("RSA-2048   : ");_sh_puti((int)(sec*1000.0/(double)n));t_print(" ms/op\n"); }
+
+        /* Disque ATA : lecture PIO de secteurs de 512 o */
+        if(_ata_ok){uint8_t sb[512];uint32_t it=0;t0=BIOS_TICKS;
+            while((dt=BIOS_TICKS-t0)<18){ata_read(0,sb);it++;}
+            sink^=sb[0];double sec=(double)dt/HZ;
+            t_print("Disque ATA : ");_sh_puti((int)((double)it*512.0/1024.0/sec));t_print(" Ko/s (PIO)\n"); }
+
+        /* Graphique : remplissage plein ecran du backbuffer (800x600) */
+        {   uint8_t* fb=(uint8_t*)0x300000;uint32_t it=0;t0=BIOS_TICKS;
+            while((dt=BIOS_TICKS-t0)<18){for(uint32_t i=0;i<800u*600u*3u;i++)fb[i]=(uint8_t)it;it++;}
+            double sec=(double)dt/HZ;
+            t_print("Graphique  : ");_sh_puti((int)((double)it*480000.0/1000000.0/sec));t_print(" Mpix/s (fill)\n"); }
+
+        t_print("======================================\n");
+        (void)sink;
     }
     else if(!strcmp(inp,"https")||_sh_sw(inp,"https ")){
         /* GET HTTPS via le client TLS 1.2 from scratch */
@@ -3073,9 +3171,9 @@ static void _burl_nav(void){
     _bpage=0;
 }
 
-#define NICONS 15
+#define NICONS 16
 static const int   IC_Y[12]={8,53,98,143,188,233,278,323,368,413,458,503};
-static const char* IC_LBL[NICONS]={"Terminal","Paint","Code","Word","Creeper","A propos","Reboot","Params","Browser","Snake","R-Type","Pong","MyCraft","Tetris","Demineur"};
+static const char* IC_LBL[NICONS]={"Terminal","Paint","Code","Word","Creeper","A propos","Reboot","Params","Browser","Snake","R-Type","Pong","MyCraft","Tetris","Demineur","Entropy"};
 #define IC_X  6
 #define IC_SZ 32
 /* 12 icones par colonne, colonnes de 76 px */
@@ -3478,6 +3576,15 @@ static void draw_icons(sfcml_Window* win){
             sfcml_fillRect(win,sfcml_rect(ix+15,iy+7,2,4),sfcml_rgb(30,30,30));
             sfcml_fillRect(win,sfcml_rect(ix+15,iy+21,2,4),sfcml_rgb(30,30,30));
             sfcml_drawRect(win,sfcml_rect(ix,iy,IC_SZ,IC_SZ),hov?SFCML_WHITE:sfcml_rgb(90,90,105));
+            break;}
+        case 15:{ /* Entropy Loop (boucle) */
+            sfcml_fillRect(win,sfcml_rect(ix,iy,IC_SZ,IC_SZ),sfcml_rgb(18,10,28));
+            sfcml_Color lp=hov?sfcml_rgb(180,120,255):sfcml_rgb(130,80,210);
+            sfcml_drawCircle(win,ix+11,iy+16,6,lp);
+            sfcml_drawCircle(win,ix+21,iy+16,6,sfcml_rgb(60,200,220));
+            sfcml_drawCircle(win,ix+11,iy+16,5,lp);
+            sfcml_drawCircle(win,ix+21,iy+16,5,sfcml_rgb(60,200,220));
+            sfcml_drawRect(win,sfcml_rect(ix,iy,IC_SZ,IC_SZ),hov?SFCML_WHITE:sfcml_rgb(80,60,120));
             break;}
         default: /* Navigateur */
             sfcml_fillRect(win,sfcml_rect(ix,iy,IC_SZ,IC_SZ),sfcml_rgb(248,249,250));
@@ -5030,6 +5137,7 @@ static void on_press(int mx,int my,int btn){
             else if(found==12)win_open(W_MINE);
             else if(found==13){win_open(W_TETRIS);tet_reset();}
             else if(found==14){win_open(W_DEMINE);ms_reset();}
+            else if(found==15)serial_puts("LAUNCH_ENTROPY\n"); /* lance le vrai jeu via l'hote */
             else{win_open(W_BROWSER);_bnav(0);}
         }
         _sel_icon=found;
@@ -6044,6 +6152,7 @@ static void draw_mines(sfcml_Window* win,int wi){
 void kmain(void){
     char lb[96],nb[16];
     time_init();
+    serial_init();
     klog("MyOS: kernel C en mode protege 32-bit");
     klog("IDT chargee, PIC remappe (0x20-0x2F), PIT 18.2 Hz sur IRQ0");
     if(!sfcml_init())for(;;)__asm__ volatile("hlt");
